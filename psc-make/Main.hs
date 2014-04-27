@@ -23,8 +23,9 @@ import Data.Version (showVersion)
 
 import System.Console.CmdTheLine
 import System.Directory
-       (doesFileExist, getModificationTime, createDirectoryIfMissing)
-import System.FilePath (takeDirectory)
+       (getHomeDirectory, doesFileExist, getModificationTime,
+        createDirectoryIfMissing)
+import System.FilePath (pathSeparator, takeDirectory)
 import System.Exit (exitSuccess, exitFailure)
 import System.IO.Error (tryIOError)
 
@@ -35,7 +36,9 @@ import qualified Paths_purescript as Paths
 import qualified System.IO.UTF8 as U
 
 preludeFilename :: IO FilePath
-preludeFilename = Paths.getDataFileName "prelude/prelude.purs"
+preludeFilename = do
+  home <- getHomeDirectory
+  return $ home ++ pathSeparator : ".purescript" ++ pathSeparator : "prelude.purs"
 
 readInput :: [FilePath] -> IO (Either ParseError [(FilePath, P.Module)])
 readInput input = fmap collect $ forM input $ \inputFile -> do

@@ -119,7 +119,9 @@ getHistoryFilename = getUserConfigFile "purescript" "psci_history"
 -- Grabs the filename where prelude is.
 --
 getPreludeFilename :: IO FilePath
-getPreludeFilename = Paths.getDataFileName "prelude/prelude.purs"
+getPreludeFilename = do
+  home <- getHomeDirectory
+  return $ home ++ pathSeparator : ".purescript" ++ pathSeparator : "prelude.purs"
 
 -- |
 -- Loads a file for use with imports.
