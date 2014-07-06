@@ -93,13 +93,11 @@ imports =
 --
 declToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Declaration -> Environment -> SupplyT m (Maybe [JS])
 declToJs opts mp (ValueDeclaration ident _ _ _ val) e = do
-  js <- valueToJs opts mp e val
-  return $ Just [JSVariableIntroduction (identToJs ident) (Just js)]
-declToJs opts mp (BindingGroupDeclaration vals) e = do
-  jss <- flip mapM vals $ \(ident, _, val) -> do
-    js <- valueToJs opts mp e val
-    return $ JSVariableIntroduction (identToJs ident) (Just js)
+  jss <- valueDeclToJs opts mp e ident val
   return $ Just jss
+declToJs opts mp (BindingGroupDeclaration vals) e = do
+  jss <- forM vals $ \(ident, _, val) -> valueDeclToJs opts mp e ident val
+  return $ Just (concat jss)
 declToJs _ mp (DataDeclaration _ _ ctors) _ = do
   return $ Just $ flip concatMap ctors $ \(pn@(ProperName ctor), tys) ->
     [JSVariableIntroduction ctor (Just (go pn 0 tys []))]
@@ -116,6 +114,45 @@ declToJs opts mp (DataBindingGroupDeclaration ds) e = do
 declToJs _ _ (ExternDeclaration _ _ (Just js) _) _ = return $ Just [js]
 declToJs opts mp (PositionedDeclaration _ d) e = declToJs opts mp d e
 declToJs _ _ _ _ = return Nothing
+
+valueDeclToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> Ident -> Value -> SupplyT m [JS]
+valueDeclToJs opts mp e ident val =
+  case extractFunctionArguments val of
+    (args, val') | length args > 1 -> curriedDeclarationToJs ident opts mp e args val'
+    _ -> do
+      js <- valueToJs opts mp e val
+      return [JSVariableIntroduction (identToJs ident) (Just js)]
+
+-- |
+-- Pull all of the function abstractions off the front of a value
+--
+extractFunctionArguments :: Value -> ([Ident], Value)
+extractFunctionArguments = go []
+  where
+  go acc (Abs (Left ident) result) = go (ident : acc) result
+  go _   (Abs (Right _) _) = error "Binder was not desugared in extractFunctionArguments"
+  go acc (TypedValue _ val _) = go acc val
+  go acc (PositionedValue _ val) = go acc val
+  go acc other = (reverse acc, other)
+
+curriedDeclarationToJs :: (Functor m, Applicative m, Monad m) => Ident -> Options -> ModuleName -> Environment -> [Ident] -> Value -> SupplyT m [JS]
+curriedDeclarationToJs ident opts mp e args val = do
+  js <- valueToJs opts mp e val
+  let
+    uncurried :: JS
+    uncurried = JSFunction Nothing (map identToJs args) (JSBlock [JSReturn js])
+
+    curried :: JS
+    curried = foldr (\arg ret -> JSFunction Nothing [identToJs arg] (JSBlock [JSReturn ret])) applyUncurried args
+
+    applyUncurried :: JS
+    applyUncurried = foldl (\ret arg -> JSApp ret [JSVar (identToJs arg)]) (JSVar uncurriedName) args
+
+    uncurriedName :: String
+    uncurriedName = "__uncurried_" ++ identToJs ident
+  return [ JSVariableIntroduction uncurriedName (Just uncurried)
+         , JSVariableIntroduction (identToJs ident) (Just curried)
+         ]
 
 -- |
 -- Generate key//value pairs for an object literal exporting values from a module.
