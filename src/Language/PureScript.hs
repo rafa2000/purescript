@@ -78,7 +78,7 @@ compile' env opts ms = do
   let elim = if null entryPoints then regrouped else eliminateDeadCode entryPoints regrouped
   let codeGenModules = moduleNameFromString `map` optionsCodeGenModules opts
   let modulesToCodeGen = if null codeGenModules then elim else filter (\(Module mn _ _) -> mn `elem` codeGenModules) elim
-  let js = evalSupply nextVar $ concat <$> mapM (\m -> moduleToJs Globals opts m env') modulesToCodeGen
+  let js = evalSupply nextVar $ flip evalStateT emptyCodeGenEnvironment $ concat <$> mapM (\m -> moduleToJs Globals opts m env') modulesToCodeGen
   let exts = intercalate "\n" . map (`moduleToPs` env') $ modulesToCodeGen
   js' <- generateMain env' opts js
   return (prettyPrintJS js', exts, env')
@@ -191,16 +191,16 @@ make outputDir opts ms = do
 
   (desugared, nextVar) <- liftError $ stringifyErrorStack True $ runSupplyT 0 $ zip (map fst marked) <$> desugar (map snd marked)
 
-  evalSupplyT nextVar (go initEnvironment desugared)
+  evalSupplyT nextVar $ go initEnvironment emptyCodeGenEnvironment desugared
 
   where
-  go :: (Functor m, Applicative m, Monad m, MonadMake m) => Environment -> [(Bool, Module)] -> SupplyT m Environment
-  go env [] = return env
-  go env ((False, m) : ms') = do
+  go :: (Functor m, Applicative m, Monad m, MonadMake m) => Environment -> CodeGenEnvironment -> [(Bool, Module)] -> SupplyT m Environment
+  go env _ [] = return env
+  go env cgenv ((False, m) : ms') = do
     (_, env') <- lift . liftError . runCheck' opts env $ typeCheckModule Nothing m
 
-    go env' ms'
-  go env ((True, m@(Module moduleName' _ exps)) : ms') = do
+    go env' cgenv ms'
+  go env cgenv ((True, m@(Module moduleName' _ exps)) : ms') = do
     let filePath = runModuleName moduleName'
         jsFile = outputDir ++ pathSeparator : filePath ++ pathSeparator : "index.js"
         externsFile = outputDir ++ pathSeparator : filePath ++ pathSeparator : "externs.purs"
@@ -212,13 +212,13 @@ make outputDir opts ms = do
     regrouped <- lift . liftError . stringifyErrorStack True . createBindingGroups moduleName' . collapseBindingGroups $ elaborated
 
     let mod' = Module moduleName' regrouped exps
-    js <- prettyPrintJS <$> moduleToJs CommonJS opts mod' env'
+    (js, cgenv') <- flip runStateT cgenv $ prettyPrintJS <$> moduleToJs CommonJS opts mod' env'
     let exts = moduleToPs mod' env'
 
     lift $ writeTextFile jsFile js
     lift $ writeTextFile externsFile exts
 
-    go env' ms'
+    go env' cgenv' ms'
 
   rebuildIfNecessary :: (Functor m, Monad m, MonadMake m) => M.Map ModuleName [ModuleName] -> S.Set ModuleName -> [Module] -> m [(Bool, Module)]
   rebuildIfNecessary _ _ [] = return []

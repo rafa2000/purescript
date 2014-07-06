@@ -18,6 +18,8 @@
 module Language.PureScript.CodeGen.JS (
     module AST,
     ModuleType(..),
+    CodeGenEnvironment(..),
+    emptyCodeGenEnvironment,
     declToJs,
     moduleToJs,
     isIdent
@@ -27,10 +29,9 @@ import Data.Maybe (catMaybes, fromJust, fromMaybe)
 import Data.Function (on)
 import Data.List (nub, (\\))
 
-import Control.Monad (replicateM, forM)
+import Control.Monad.State
 import Control.Applicative
 
-import qualified Data.Set as S
 import qualified Data.Map as M
 
 import Language.PureScript.Names
@@ -54,25 +55,26 @@ data CodeGenEnvironment = CodeGenEnvironment
     -- |
     -- Set of function names which have been uncurried during code generation
     --
-    codeGenUncurriedFunctions :: S.Set (Qualified Ident)
+    codeGenUncurriedFunctions :: M.Map (ModuleName, Ident) Int
   }
 
 emptyCodeGenEnvironment :: CodeGenEnvironment
-emptyCodeGenEnvironment = CodeGenEnvironment S.empty
+emptyCodeGenEnvironment = CodeGenEnvironment M.empty
 
 -- |
 -- Generate code in the simplified Javascript intermediate representation for all declarations in a
 -- module.
 --
-moduleToJs :: (Functor m, Applicative m, Monad m) => ModuleType -> Options -> Module -> Environment -> SupplyT m [JS]
-moduleToJs mt opts (Module name decls (Just exps)) env = do
+moduleToJs :: (Functor m, Applicative m, Monad m) => ModuleType -> Options -> Module -> Environment -> StateT CodeGenEnvironment (SupplyT m) [JS]
+moduleToJs mt opts (Module name decls (Just exps)) env = StateT $ \cgEnv -> do
   let jsImports = map (importToJs mt opts) . (\\ [name]) . nub $ concatMap imports decls
-  jsDecls <- mapM (\decl -> declToJs opts name decl env) decls
+  let cgEnv' = extendCodeGenEnvironment name decls cgEnv
+  jsDecls <- mapM (\decl -> declToJs opts name decl env cgEnv') decls
   let optimized = concat $ map (map $ optimize opts) $ catMaybes jsDecls
   let isModuleEmpty = null optimized
   let moduleBody = JSStringLiteral "use strict" : jsImports ++ optimized
-  let moduleExports = JSObjectLiteral $ concatMap exportToJs exps
-  return $ case mt of
+  let moduleExports = JSObjectLiteral [ (runIdent expName, var expName) | ex <- exps, expName <- exportToJs name cgEnv' ex ]
+  return ((case mt of
     CommonJS -> moduleBody ++ [JSAssignment (JSAccessor "exports" (JSVar "module")) moduleExports]
     Globals | not isModuleEmpty ->
       [ JSVariableIntroduction (fromJust (optionsBrowserNamespace opts))
@@ -80,8 +82,23 @@ moduleToJs mt opts (Module name decls (Just exps)) env = do
       , JSAssignment (JSAccessor (moduleNameToJs name) (JSVar (fromJust (optionsBrowserNamespace opts))))
                      (JSApp (JSFunction Nothing [] (JSBlock (moduleBody ++ [JSReturn moduleExports]))) [])
       ]
-    _ -> []
+    _ -> []), cgEnv')
 moduleToJs _ _ _ _ = error "Exports should have been elaborated in name desugaring"
+
+extendCodeGenEnvironment :: ModuleName -> [Declaration] -> CodeGenEnvironment -> CodeGenEnvironment
+extendCodeGenEnvironment mn ds env = foldl go env ds
+  where
+  go :: CodeGenEnvironment -> Declaration -> CodeGenEnvironment
+  go cgEnv (ValueDeclaration ident _ _ _ val) = handleValue cgEnv ident val
+  go cgEnv (BindingGroupDeclaration vals) = foldl (\e (ident, _, val) -> handleValue e ident val) cgEnv vals
+  go cgEnv (PositionedDeclaration _ d) = go cgEnv d
+  go cgEnv _ = cgEnv
+
+  handleValue :: CodeGenEnvironment -> Ident -> Value -> CodeGenEnvironment
+  handleValue cgEnv ident val =
+    case extractFunctionArguments val of
+      (args, _) | length args > 1 -> cgEnv { codeGenUncurriedFunctions = M.insert (mn, ident) (length args) (codeGenUncurriedFunctions cgEnv)  }
+      _ -> cgEnv
 
 importToJs :: ModuleType -> Options -> ModuleName -> JS
 importToJs mt opts mn = JSVariableIntroduction (moduleNameToJs mn) (Just moduleBody)
@@ -103,14 +120,14 @@ imports =
 -- |
 -- Generate code in the simplified Javascript intermediate representation for a declaration
 --
-declToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Declaration -> Environment -> SupplyT m (Maybe [JS])
-declToJs opts mp (ValueDeclaration ident _ _ _ val) e = do
-  jss <- valueDeclToJs opts mp e ident val
+declToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Declaration -> Environment -> CodeGenEnvironment -> SupplyT m (Maybe [JS])
+declToJs opts mp (ValueDeclaration ident _ _ _ val) e cgEnv = do
+  jss <- valueDeclToJs opts mp e cgEnv ident val
   return $ Just jss
-declToJs opts mp (BindingGroupDeclaration vals) e = do
-  jss <- forM vals $ \(ident, _, val) -> valueDeclToJs opts mp e ident val
+declToJs opts mp (BindingGroupDeclaration vals) e cgEnv = do
+  jss <- forM vals $ \(ident, _, val) -> valueDeclToJs opts mp e cgEnv ident val
   return $ Just (concat jss)
-declToJs _ mp (DataDeclaration _ _ ctors) _ = do
+declToJs _ mp (DataDeclaration _ _ ctors) _ _ = do
   return $ Just $ flip concatMap ctors $ \(pn@(ProperName ctor), tys) ->
     [JSVariableIntroduction ctor (Just (go pn 0 tys []))]
     where
@@ -120,19 +137,19 @@ declToJs _ mp (DataDeclaration _ _ ctors) _ = do
     go pn index (_ : tys') values =
       JSFunction Nothing ["value" ++ show index]
         (JSBlock [JSReturn (go pn (index + 1) tys' (JSVar ("value" ++ show index) : values))])
-declToJs opts mp (DataBindingGroupDeclaration ds) e = do
-  jss <- mapM (\decl -> declToJs opts mp decl e) ds
+declToJs opts mp (DataBindingGroupDeclaration ds) e cgEnv = do
+  jss <- mapM (\decl -> declToJs opts mp decl e cgEnv) ds
   return $ Just $ concat $ catMaybes jss
-declToJs _ _ (ExternDeclaration _ _ (Just js) _) _ = return $ Just [js]
-declToJs opts mp (PositionedDeclaration _ d) e = declToJs opts mp d e
-declToJs _ _ _ _ = return Nothing
+declToJs _ _ (ExternDeclaration _ _ (Just js) _) _ _ = return $ Just [js]
+declToJs opts mp (PositionedDeclaration _ d) e cgEnv = declToJs opts mp d e cgEnv
+declToJs _ _ _ _ _ = return Nothing
 
-valueDeclToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> Ident -> Value -> SupplyT m [JS]
-valueDeclToJs opts mp e ident val =
+valueDeclToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> CodeGenEnvironment -> Ident -> Value -> SupplyT m [JS]
+valueDeclToJs opts mp e cgEnv ident val =
   case extractFunctionArguments val of
-    (args, val') | length args > 1 -> curriedDeclarationToJs ident opts mp e args val'
+    (args, val') | length args > 1 -> curriedDeclarationToJs ident opts mp e cgEnv args val'
     _ -> do
-      js <- valueToJs opts mp e val
+      js <- valueToJs opts mp e cgEnv val
       return [JSVariableIntroduction (identToJs ident) (Just js)]
 
 -- |
@@ -147,9 +164,9 @@ extractFunctionArguments = go []
   go acc (PositionedValue _ val) = go acc val
   go acc other = (reverse acc, other)
 
-curriedDeclarationToJs :: (Functor m, Applicative m, Monad m) => Ident -> Options -> ModuleName -> Environment -> [Ident] -> Value -> SupplyT m [JS]
-curriedDeclarationToJs ident opts mp e args val = do
-  js <- valueToJs opts mp e val
+curriedDeclarationToJs :: (Functor m, Applicative m, Monad m) => Ident -> Options -> ModuleName -> Environment -> CodeGenEnvironment -> [Ident] -> Value -> SupplyT m [JS]
+curriedDeclarationToJs ident opts mp e cgEnv args val = do
+  js <- valueToJs opts mp e cgEnv val
   let
     uncurried :: JS
     uncurried = JSFunction Nothing (map identToJs args) (JSBlock [JSReturn js])
@@ -158,22 +175,24 @@ curriedDeclarationToJs ident opts mp e args val = do
     curried = foldr (\arg ret -> JSFunction Nothing [identToJs arg] (JSBlock [JSReturn ret])) applyUncurried args
 
     applyUncurried :: JS
-    applyUncurried = JSApp (JSVar uncurriedName) [JSVar (identToJs arg) | arg <- args]
-
-    uncurriedName :: String
-    uncurriedName = "__uncurried_" ++ identToJs ident
-  return [ JSVariableIntroduction uncurriedName (Just uncurried)
+    applyUncurried = JSApp (JSVar (identToJs (uncurriedName ident))) [JSVar (identToJs arg) | arg <- args]
+  return [ JSVariableIntroduction (identToJs (uncurriedName ident)) (Just uncurried)
          , JSVariableIntroduction (identToJs ident) (Just curried)
          ]
+
+uncurriedName :: Ident -> Ident
+uncurriedName ident = Ident ("__uncurried_" ++ identToJs ident)
 
 -- |
 -- Generate key//value pairs for an object literal exporting values from a module.
 --
-exportToJs :: DeclarationRef -> [(String, JS)]
-exportToJs (TypeRef _ (Just dctors)) = map ((\n -> (n, var (Ident n))) . runProperName) dctors
-exportToJs (ValueRef name) = [(runIdent name, var name)]
-exportToJs (TypeInstanceRef name) = [(runIdent name, var name)]
-exportToJs _ = []
+exportToJs :: ModuleName -> CodeGenEnvironment -> DeclarationRef -> [Ident]
+exportToJs _ _ (TypeRef _ (Just dctors)) = map (Ident . runProperName) dctors
+exportToJs mn cgEnv (ValueRef name) | M.member (mn, name) (codeGenUncurriedFunctions cgEnv) = [name, uncurriedName name]
+                                    | otherwise = [name]
+exportToJs mn cgEnv (TypeInstanceRef name) | M.member (mn, name) (codeGenUncurriedFunctions cgEnv) = [name, uncurriedName name]
+                                           | otherwise = [name]
+exportToJs _ _ _ = []
 
 -- |
 -- Generate code in the simplified Javascript intermediate representation for a variable based on a
@@ -198,39 +217,66 @@ accessorString prop | isIdent prop = JSAccessor prop
 -- |
 -- Generate code in the simplified Javascript intermediate representation for a value or expression.
 --
-valueToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> Value -> SupplyT m JS
-valueToJs _ _ _ (NumericLiteral n) = return $ JSNumericLiteral n
-valueToJs _ _ _ (StringLiteral s) = return $ JSStringLiteral s
-valueToJs _ _ _ (BooleanLiteral b) = return $ JSBooleanLiteral b
-valueToJs opts m e (ArrayLiteral xs) = JSArrayLiteral <$> mapM (valueToJs opts m e) xs
-valueToJs opts m e (ObjectLiteral ps) = JSObjectLiteral <$> mapM (sndM (valueToJs opts m e)) ps
-valueToJs opts m e (ObjectUpdate o ps) = do
-  obj <- valueToJs opts m e o
-  sts <- mapM (sndM (valueToJs opts m e)) ps
+valueToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> CodeGenEnvironment -> Value -> SupplyT m JS
+valueToJs _    _ _ _     (NumericLiteral n) = return $ JSNumericLiteral n
+valueToJs _    _ _ _     (StringLiteral s) = return $ JSStringLiteral s
+valueToJs _    _ _ _     (BooleanLiteral b) = return $ JSBooleanLiteral b
+valueToJs opts m e cgEnv (ArrayLiteral xs) = JSArrayLiteral <$> mapM (valueToJs opts m e cgEnv) xs
+valueToJs opts m e cgEnv (ObjectLiteral ps) = JSObjectLiteral <$> mapM (sndM (valueToJs opts m e cgEnv)) ps
+valueToJs opts m e cgEnv (ObjectUpdate o ps) = do
+  obj <- valueToJs opts m e cgEnv o
+  sts <- mapM (sndM (valueToJs opts m e cgEnv)) ps
   extendObj obj sts
-valueToJs _ m _ (Constructor name) = return $ qualifiedToJS m (Ident . runProperName) name
-valueToJs opts m e (Case values binders) = do
-  vals <- mapM (valueToJs opts m e) values
-  bindersToJs opts m e binders vals
-valueToJs opts m e (IfThenElse cond th el) = JSConditional <$> valueToJs opts m e cond <*> valueToJs opts m e th <*> valueToJs opts m e el
-valueToJs opts m e (Accessor prop val) = accessorString prop <$> valueToJs opts m e val
-valueToJs opts m e (App val arg) = JSApp <$> valueToJs opts m e val <*> (return <$> valueToJs opts m e arg)
-valueToJs opts m e (Let ds val) = do
-  decls <- concat . catMaybes <$> mapM (flip (declToJs opts m) e) ds
-  ret <- valueToJs opts m e val
+valueToJs _    m _ _     (Constructor name) = return $ qualifiedToJS m (Ident . runProperName) name
+valueToJs opts m e cgEnv (Case values binders) = do
+  vals <- mapM (valueToJs opts m e cgEnv) values
+  bindersToJs opts m e cgEnv binders vals
+valueToJs opts m e cgEnv (IfThenElse cond th el) = JSConditional <$> valueToJs opts m e cgEnv cond <*> valueToJs opts m e cgEnv th <*> valueToJs opts m e cgEnv el
+valueToJs opts m e cgEnv (Accessor prop val) = accessorString prop <$> valueToJs opts m e cgEnv val
+valueToJs opts m e cgEnv app@(App fn arg) =
+  case canUncurry m cgEnv app of
+    Just (Qualified mn fnName, args) -> appToJs opts m e cgEnv (Var (Qualified mn (uncurriedName fnName))) args
+    Nothing -> appToJs opts m e cgEnv fn [arg]
+valueToJs opts m e cgEnv (Let ds val) = do
+  let cgEnv' = extendCodeGenEnvironment m ds cgEnv
+  decls <- concat . catMaybes <$> mapM (\d -> declToJs opts m d e cgEnv') ds
+  ret <- valueToJs opts m e cgEnv' val
   return $ JSApp (JSFunction Nothing [] (JSBlock (decls ++ [JSReturn ret]))) []
-valueToJs opts m e (Abs (Left arg) val) = do
-  ret <- valueToJs opts m e val
+valueToJs opts m e cgEnv (Abs (Left arg) val) = do
+  ret <- valueToJs opts m e cgEnv val
   return $ JSFunction Nothing [identToJs arg] (JSBlock [JSReturn ret])
-valueToJs opts m e (TypedValue _ (Abs (Left arg) val) ty) | optionsPerformRuntimeTypeChecks opts = do
+valueToJs opts m e cgEnv (TypedValue _ (Abs (Left arg) val) ty) | optionsPerformRuntimeTypeChecks opts = do
   let arg' = identToJs arg
-  ret <- valueToJs opts m e val
+  ret <- valueToJs opts m e cgEnv val
   return $ JSFunction Nothing [arg'] (JSBlock $ runtimeTypeChecks arg' ty ++ [JSReturn ret])
-valueToJs _ m _ (Var ident) = return $ varToJs m ident
-valueToJs opts m e (TypedValue _ val _) = valueToJs opts m e val
-valueToJs opts m e (PositionedValue _ val) = valueToJs opts m e val
-valueToJs _ _ _ (TypeClassDictionary _ _ _) = error "Type class dictionary was not replaced"
-valueToJs _ _ _ _ = error "Invalid argument to valueToJs"
+valueToJs _    m _ _     (Var ident) = return $ varToJs m ident
+valueToJs opts m e cgEnv (TypedValue _ val _) = valueToJs opts m e cgEnv val
+valueToJs opts m e cgEnv (PositionedValue _ val) = valueToJs opts m e cgEnv val
+valueToJs _    _ _ _     (TypeClassDictionary _ _ _) = error "Type class dictionary was not replaced"
+valueToJs _    _ _ _     _ = error "Invalid argument to valueToJs"
+
+canUncurry :: ModuleName -> CodeGenEnvironment -> Value -> Maybe (Qualified Ident, [Value])
+canUncurry mn cgEnv app =
+  let
+    extract acc (App fn arg) = extract (arg : acc) fn
+    extract acc (TypedValue _ val _) = extract acc val
+    extract acc (PositionedValue _ val) = extract acc val
+    extract acc other = (other, acc)
+
+    varName (Var name) = Just name
+    varName (TypedValue _ val _) = varName val
+    varName (PositionedValue _ val) = varName val
+    varName _ = Nothing
+
+    (lhs, args) = extract [] app
+
+    fnNameAndArgs = case varName lhs of
+      Just name | M.lookup (qualify mn name) (codeGenUncurriedFunctions cgEnv) == Just (length args) -> Just (name, args)
+      _ -> Nothing
+  in fnNameAndArgs
+
+appToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> CodeGenEnvironment -> Value -> [Value] -> SupplyT m JS
+appToJs opts m e cgEnv fn args = JSApp <$> valueToJs opts m e cgEnv fn <*> mapM (valueToJs opts m e cgEnv) args
 
 -- |
 -- Shallow copy an object.
@@ -303,11 +349,11 @@ qualifiedToJS _ f (Qualified _ a) = JSVar $ identToJs (f a)
 -- Generate code in the simplified Javascript intermediate representation for pattern match binders
 -- and guards.
 --
-bindersToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> [CaseAlternative] -> [JS] -> SupplyT m JS
-bindersToJs opts m e binders vals = do
+bindersToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> Environment -> CodeGenEnvironment -> [CaseAlternative] -> [JS] -> SupplyT m JS
+bindersToJs opts m e cgEnv binders vals = do
   valNames <- replicateM (length vals) freshName
   jss <- forM binders $ \(CaseAlternative bs grd result) -> do
-    ret <- valueToJs opts m e result
+    ret <- valueToJs opts m e cgEnv result
     go valNames [JSReturn ret] bs grd
   return $ JSApp (JSFunction Nothing valNames (JSBlock (concat jss ++ [JSThrow (JSStringLiteral "Failed pattern match")])))
                  vals
@@ -315,30 +361,30 @@ bindersToJs opts m e binders vals = do
     go :: (Functor m, Applicative m, Monad m) => [String] -> [JS] -> [Binder] -> Maybe Guard -> SupplyT m [JS]
     go _ done [] Nothing = return done
     go _ done [] (Just cond) = do
-      cond' <- valueToJs opts m e cond
+      cond' <- valueToJs opts m e cgEnv cond
       return [JSIfElse cond' (JSBlock done) Nothing]
     go (v:vs) done' (b:bs) grd = do
       done'' <- go vs done' bs grd
-      binderToJs m e v done'' b
+      binderToJs m e cgEnv v done'' b
     go _ _ _ _ = error "Invalid arguments to bindersToJs"
 
 -- |
 -- Generate code in the simplified Javascript intermediate representation for a pattern match
 -- binder.
 --
-binderToJs :: (Functor m, Applicative m, Monad m) => ModuleName -> Environment -> String -> [JS] -> Binder -> SupplyT m [JS]
-binderToJs _ _ _ done NullBinder = return done
-binderToJs _ _ varName done (StringBinder str) =
+binderToJs :: (Functor m, Applicative m, Monad m) => ModuleName -> Environment -> CodeGenEnvironment -> String -> [JS] -> Binder -> SupplyT m [JS]
+binderToJs _ _ _ _ done NullBinder = return done
+binderToJs _ _ _ varName done (StringBinder str) =
   return [JSIfElse (JSBinary EqualTo (JSVar varName) (JSStringLiteral str)) (JSBlock done) Nothing]
-binderToJs _ _ varName done (NumberBinder num) =
+binderToJs _ _ _ varName done (NumberBinder num) =
   return [JSIfElse (JSBinary EqualTo (JSVar varName) (JSNumericLiteral num)) (JSBlock done) Nothing]
-binderToJs _ _ varName done (BooleanBinder True) =
+binderToJs _ _ _ varName done (BooleanBinder True) =
   return [JSIfElse (JSVar varName) (JSBlock done) Nothing]
-binderToJs _ _ varName done (BooleanBinder False) =
+binderToJs _ _ _ varName done (BooleanBinder False) =
   return [JSIfElse (JSUnary Not (JSVar varName)) (JSBlock done) Nothing]
-binderToJs _ _ varName done (VarBinder ident) =
+binderToJs _ _ _ varName done (VarBinder ident) =
   return (JSVariableIntroduction (identToJs ident) (Just (JSVar varName)) : done)
-binderToJs m e varName done (ConstructorBinder ctor bs) = do
+binderToJs m e cgEnv varName done (ConstructorBinder ctor bs) = do
   js <- go 0 done bs
   if isOnlyConstructor e ctor
   then
@@ -353,18 +399,18 @@ binderToJs m e varName done (ConstructorBinder ctor bs) = do
   go index done' (binder:bs') = do
     argVar <- freshName
     done'' <- go (index + 1) done' bs'
-    js <- binderToJs m e argVar done'' binder
+    js <- binderToJs m e cgEnv argVar done'' binder
     return (JSVariableIntroduction argVar (Just (JSIndexer (JSNumericLiteral (Left index)) (JSAccessor "values" (JSVar varName)))) : js)
-binderToJs m e varName done (ObjectBinder bs) = go done bs
+binderToJs m e cgEnv varName done (ObjectBinder bs) = go done bs
   where
   go :: (Functor m, Applicative m, Monad m) => [JS] -> [(String, Binder)] -> SupplyT m [JS]
   go done' [] = return done'
   go done' ((prop, binder):bs') = do
     propVar <- freshName
     done'' <- go done' bs'
-    js <- binderToJs m e propVar done'' binder
+    js <- binderToJs m e cgEnv propVar done'' binder
     return (JSVariableIntroduction propVar (Just (accessorString prop (JSVar varName))) : js)
-binderToJs m e varName done (ArrayBinder bs) = do
+binderToJs m e cgEnv varName done (ArrayBinder bs) = do
   js <- go done 0 bs
   return [JSIfElse (JSBinary EqualTo (JSAccessor "length" (JSVar varName)) (JSNumericLiteral (Left (fromIntegral $ length bs)))) (JSBlock js) Nothing]
   where
@@ -373,23 +419,23 @@ binderToJs m e varName done (ArrayBinder bs) = do
   go done' index (binder:bs') = do
     elVar <- freshName
     done'' <- go done' (index + 1) bs'
-    js <- binderToJs m e elVar done'' binder
+    js <- binderToJs m e cgEnv elVar done'' binder
     return (JSVariableIntroduction elVar (Just (JSIndexer (JSNumericLiteral (Left index)) (JSVar varName))) : js)
-binderToJs m e varName done (ConsBinder headBinder tailBinder) = do
+binderToJs m e cgEnv varName done (ConsBinder headBinder tailBinder) = do
   headVar <- freshName
   tailVar <- freshName
-  js1 <- binderToJs m e headVar done headBinder
-  js2 <- binderToJs m e tailVar js1 tailBinder
+  js1 <- binderToJs m e cgEnv headVar done headBinder
+  js2 <- binderToJs m e cgEnv tailVar js1 tailBinder
   return [JSIfElse (JSBinary GreaterThan (JSAccessor "length" (JSVar varName)) (JSNumericLiteral (Left 0))) (JSBlock
     ( JSVariableIntroduction headVar (Just (JSIndexer (JSNumericLiteral (Left 0)) (JSVar varName))) :
       JSVariableIntroduction tailVar (Just (JSApp (JSAccessor "slice" (JSVar varName)) [JSNumericLiteral (Left 1)])) :
       js2
     )) Nothing]
-binderToJs m e varName done (NamedBinder ident binder) = do
-  js <- binderToJs m e varName done binder
+binderToJs m e cgEnv varName done (NamedBinder ident binder) = do
+  js <- binderToJs m e cgEnv varName done binder
   return (JSVariableIntroduction (identToJs ident) (Just (JSVar varName)) : js)
-binderToJs m e varName done (PositionedBinder _ binder) =
-  binderToJs m e varName done binder
+binderToJs m e cgEnv varName done (PositionedBinder _ binder) =
+  binderToJs m e cgEnv varName done binder
 
 -- |
 -- Checks whether a data constructor is the only constructor for that type, used to simplify the
