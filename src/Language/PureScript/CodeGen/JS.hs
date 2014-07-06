@@ -30,6 +30,7 @@ import Data.List (nub, (\\))
 import Control.Monad (replicateM, forM)
 import Control.Applicative
 
+import qualified Data.Set as S
 import qualified Data.Map as M
 
 import Language.PureScript.Names
@@ -47,6 +48,17 @@ import Language.PureScript.Traversals (sndM)
 -- Different types of modules which are supported
 --
 data ModuleType = CommonJS | Globals
+
+data CodeGenEnvironment = CodeGenEnvironment
+  {
+    -- |
+    -- Set of function names which have been uncurried during code generation
+    --
+    codeGenUncurriedFunctions :: S.Set (Qualified Ident)
+  }
+
+emptyCodeGenEnvironment :: CodeGenEnvironment
+emptyCodeGenEnvironment = CodeGenEnvironment S.empty
 
 -- |
 -- Generate code in the simplified Javascript intermediate representation for all declarations in a
@@ -146,7 +158,7 @@ curriedDeclarationToJs ident opts mp e args val = do
     curried = foldr (\arg ret -> JSFunction Nothing [identToJs arg] (JSBlock [JSReturn ret])) applyUncurried args
 
     applyUncurried :: JS
-    applyUncurried = foldl (\ret arg -> JSApp ret [JSVar (identToJs arg)]) (JSVar uncurriedName) args
+    applyUncurried = JSApp (JSVar uncurriedName) [JSVar (identToJs arg) | arg <- args]
 
     uncurriedName :: String
     uncurriedName = "__uncurried_" ++ identToJs ident
@@ -208,7 +220,7 @@ valueToJs opts m e (Let ds val) = do
   ret <- valueToJs opts m e val
   return $ JSApp (JSFunction Nothing [] (JSBlock (decls ++ [JSReturn ret]))) []
 valueToJs opts m e (Abs (Left arg) val) = do
-  ret <- valueToJs opts m (bindName m arg e) val
+  ret <- valueToJs opts m e val
   return $ JSFunction Nothing [identToJs arg] (JSBlock [JSReturn ret])
 valueToJs opts m e (TypedValue _ (Abs (Left arg) val) ty) | optionsPerformRuntimeTypeChecks opts = do
   let arg' = identToJs arg
@@ -238,22 +250,6 @@ extendObj obj sts = do
     stToAssign (s, js) = JSAssignment (JSAccessor s jsNewObj) js
     extend = map stToAssign sts
   return $ JSApp (JSFunction Nothing [] block) []
-  where
-
--- |
--- Temporarily extends the environment with a single local variable name
---
-bindName :: ModuleName -> Ident -> Environment -> Environment
-bindName m ident = bindNames m [ident]
-
--- |
--- Temporarily extends the environment to include local variable names introduced by lambda
--- abstractions or case statements
---
-bindNames :: ModuleName -> [Ident] -> Environment -> Environment
-bindNames m idents env = env { names = M.fromList [ ((m, ident), (noType, LocalVariable)) | ident <- idents ] `M.union` names env }
-  where
-  noType = error "Temporary lambda variable type was read"
 
 -- |
 -- Generate code in the simplified Javascript intermediate representation for runtime type checks.
@@ -311,7 +307,7 @@ bindersToJs :: (Functor m, Applicative m, Monad m) => Options -> ModuleName -> E
 bindersToJs opts m e binders vals = do
   valNames <- replicateM (length vals) freshName
   jss <- forM binders $ \(CaseAlternative bs grd result) -> do
-    ret <- valueToJs opts m (bindNames m (concatMap binderNames bs) e) result
+    ret <- valueToJs opts m e result
     go valNames [JSReturn ret] bs grd
   return $ JSApp (JSFunction Nothing valNames (JSBlock (concat jss ++ [JSThrow (JSStringLiteral "Failed pattern match")])))
                  vals
