@@ -96,9 +96,15 @@ bindLocalTypeVariables moduleName bindings =
 makeBindingGroupVisible :: (Functor m, MonadState CheckState m) => m a -> m a
 makeBindingGroupVisible action = do
   orig <- get
-  modify $ \st -> st { checkEnv = (checkEnv st) { names = M.map (\(ty, nk, _) -> (ty, nk, Defined)) (names . checkEnv $ st) } }
+  modify $ \st -> st { checkEnv = (checkEnv st)
+    { names = M.map (\(ty, nk, _) -> (ty, nk, Defined)) (names . checkEnv $ st)
+    , typeClassDictionaries = M.map (\tcd -> tcd { tcdVisibility = Defined }) (typeClassDictionaries . checkEnv $ st)
+    } }
   a <- action
-  modify $ \st -> st { checkEnv = (checkEnv st) { names = names . checkEnv $ orig } }
+  modify $ \st -> st { checkEnv = (checkEnv st)
+    { names = names . checkEnv $ orig
+    , typeClassDictionaries = typeClassDictionaries . checkEnv $ orig
+    } }
   return a
 
 -- |

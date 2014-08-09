@@ -21,6 +21,19 @@ import Data.List
 import Data.Data
 
 -- |
+-- The visibility of a name in scope
+--
+data NameVisibility
+  -- |
+  -- The name is defined in the current binding group, but is not visible
+  --
+  = Undefined
+  -- |
+  -- The name is defined in the another binding group, or has been made visible by a function binder
+  --
+  | Defined deriving (Show, Eq)
+
+-- |
 -- Names for value identifiers
 --
 data Ident

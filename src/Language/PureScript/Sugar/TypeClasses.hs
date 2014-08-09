@@ -247,10 +247,9 @@ typeInstanceDictionaryDeclaration name mn deps className tys decls =
 
       let memberNames' = ObjectLiteral (memberNames ++ superclasses)
           dictTy = foldl TypeApp (TypeConstructor className) tys
-          constrainedTy = quantify (if null deps then function unit dictTy else ConstrainedType deps dictTy)
+          constrainedTy = quantify (ConstrainedType deps dictTy)
           dict = TypeClassDictionaryConstructorApp className memberNames'
-          dict' = if null deps then Abs (Left (Ident C.__unused)) dict else dict
-          result = ValueDeclaration name TypeInstanceDictionaryValue [] Nothing (TypedValue True dict' constrainedTy)
+          result = ValueDeclaration name TypeInstanceDictionaryValue [] Nothing (TypedValue True dict constrainedTy)
       return result
 
   where

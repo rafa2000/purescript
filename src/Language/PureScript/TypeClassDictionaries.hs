@@ -46,7 +46,11 @@ data TypeClassDictionaryInScope
     -- The type of this dictionary
     --
     , tcdType :: TypeClassDictionaryType
-    } deriving (Show, Data, Typeable)
+    -- |
+    -- The visibility of this dictionary
+    --
+    , tcdVisibility :: NameVisibility
+    } deriving (Show)
 
 -- |
 -- The type of a type class dictionary

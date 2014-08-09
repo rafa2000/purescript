@@ -206,7 +206,7 @@ typeCheckAll mainModuleName moduleName (TypeInstanceDeclaration dictName deps cl
 typeCheckAll mainModuleName moduleName (d@(ExternInstanceDeclaration dictName deps className tys) : rest) = do
   mapM_ (checkTypeClassInstance moduleName) tys
   forM_ deps $ mapM_ (checkTypeClassInstance moduleName) . snd
-  addTypeClassDictionaries [TypeClassDictionaryInScope (Qualified (Just moduleName) dictName) className tys (Just deps) TCDRegular]
+  addTypeClassDictionaries [TypeClassDictionaryInScope (Qualified (Just moduleName) dictName) className tys (Just deps) TCDRegular Undefined]
   ds <- typeCheckAll mainModuleName moduleName rest
   return $ d : ds
 typeCheckAll mainModuleName moduleName (PositionedDeclaration pos d : rest) =

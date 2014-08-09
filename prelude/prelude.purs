@@ -158,7 +158,7 @@ module Prelude
     return (f' a')
 
   instance functorArr :: Functor ((->) r) where
-    (<$>) = (<<<)
+    (<$>) f g = f <<< g
 
   instance applyArr :: Apply ((->) r) where
     (<*>) f g x = f x (g x)

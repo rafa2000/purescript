@@ -320,6 +320,8 @@ entails env moduleName context = solve (sortedNubBy canonicalizeDictionary (filt
 	    -- Look for regular type instances
 	    [ mkDictionary (canonicalizeDictionary tcd) args
 	    | tcd <- context'
+	    -- Make sure that the dictionary is defined
+	    , tcdVisibility tcd == Defined
 	    -- Make sure the type class name matches the one we are trying to satisfy
 	    , className' == tcdClassName tcd
 	    -- Make sure the type unifies with the type in the type instance definition
@@ -852,8 +854,8 @@ check' val t@(ConstrainedType constraints ty) = do
   dictNames <- forM constraints $ \(Qualified _ (ProperName className), _) -> do
     n <- liftCheck freshDictionaryName
     return $ Ident $ "__dict_" ++ className ++ "_" ++ show n
-  val' <- makeBindingGroupVisible $ withTypeClassDictionaries (zipWith (\name (className, instanceTy) ->
-    TypeClassDictionaryInScope name className instanceTy Nothing TCDRegular) (map (Qualified Nothing) dictNames)
+  val' <- withTypeClassDictionaries (zipWith (\name (className, instanceTy) ->
+    TypeClassDictionaryInScope name className instanceTy Nothing TCDRegular Defined) (map (Qualified Nothing) dictNames)
       constraints) $ check val ty
   return $ TypedValue True (foldr (Abs . Left) val' dictNames) t
 check' val (SaturatedTypeSynonym name args) = do
