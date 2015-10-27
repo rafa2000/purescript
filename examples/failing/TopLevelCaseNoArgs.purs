@@ -1,4 +1,8 @@
+-- @shouldFailWith DuplicateValueDeclaration
 module Main where
-  foo :: Number
-  foo = 1
-  foo = 2
+
+import Prelude
+
+foo :: Number
+foo = 1
+foo = 2

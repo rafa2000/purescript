@@ -1,3 +1,6 @@
+-- @shouldFailWith ErrorParsingModule
 module Bad_Module where
 
-main = Debug.Trace.trace "Done"
+import Prelude
+
+main = Control.Monad.Eff.Console.log "Done"

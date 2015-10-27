@@ -13,14 +13,16 @@
 -----------------------------------------------------------------------------
 
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveFunctor #-}
 
 module Language.PureScript.CoreFn.Expr where
+
+import Control.Arrow ((***))
 
 import qualified Data.Data as D
 
 import Language.PureScript.CoreFn.Binders
 import Language.PureScript.CoreFn.Literals
-import Language.PureScript.CoreFn.Meta
 import Language.PureScript.Names
 
 -- |
@@ -32,9 +34,9 @@ data Expr a
   --
   = Literal a (Literal (Expr a))
   -- |
-  -- A data constructor (type name, constructor name, arity)
+  -- A data constructor (type name, constructor name, field names)
   --
-  | Constructor a ProperName ProperName Arity
+  | Constructor a ProperName ProperName [Ident]
   -- |
   -- A record property accessor
   --
@@ -62,7 +64,7 @@ data Expr a
   -- |
   -- A let binding
   --
-  | Let a [Bind a] (Expr a) deriving (Show, D.Data, D.Typeable)
+  | Let a [Bind a] (Expr a) deriving (Show, Read, D.Data, D.Typeable, Functor)
 
 -- |
 -- A let or module binding.
@@ -75,7 +77,7 @@ data Bind a
   -- |
   -- Mutually recursive binding group for several values
   --
-  | Rec [(Ident, Expr a)] deriving (Show, D.Data, D.Typeable)
+  | Rec [(Ident, Expr a)] deriving (Show, Read, D.Data, D.Typeable, Functor)
 
 -- |
 -- A guard is just a boolean-valued expression that appears alongside a set of binders
@@ -94,7 +96,13 @@ data CaseAlternative a = CaseAlternative
     -- The result expression or a collect of guarded expressions
     --
   , caseAlternativeResult :: Either [(Guard a, Expr a)] (Expr a)
-  } deriving (Show, D.Data, D.Typeable)
+  } deriving (Show, Read, D.Data, D.Typeable)
+
+instance Functor CaseAlternative where
+
+  fmap f (CaseAlternative cabs car) = CaseAlternative
+    (fmap (fmap f) cabs)
+    (either (Left . fmap (fmap f *** fmap f)) (Right . fmap f) car)
 
 -- |
 -- Extract the annotation from a term
@@ -109,6 +117,7 @@ extractAnn (App a _ _) = a
 extractAnn (Var a _) = a
 extractAnn (Case a _ _) = a
 extractAnn (Let a _ _) = a
+
 
 -- |
 -- Modify the annotation on a term

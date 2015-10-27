@@ -1,4 +1,7 @@
+-- @shouldFailWith TransitiveExportError
 module InstanceExport (S(..), f) where
+
+import Prelude
 
 newtype S = S String
 
@@ -11,5 +14,6 @@ instance fs :: F S where
 module Test where
 
 import InstanceExport
+import Prelude
 
 test = f $ S "Test"

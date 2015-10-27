@@ -13,6 +13,8 @@
 --
 -----------------------------------------------------------------------------
 
+{-# LANGUAGE CPP #-}
+
 module Language.PureScript.Pretty.JS (
     prettyPrintJS
 ) where
@@ -20,12 +22,15 @@ module Language.PureScript.Pretty.JS (
 import Data.List
 import Data.Maybe (fromMaybe)
 
+#if __GLASGOW_HASKELL__ < 710
 import Control.Applicative
+#endif
 import Control.Arrow ((<+>))
 import Control.Monad.State
 import Control.PatternArrows
 import qualified Control.Arrow as A
 
+import Language.PureScript.Crash
 import Language.PureScript.CodeGen.JS.AST
 import Language.PureScript.CodeGen.JS.Common
 import Language.PureScript.Pretty.Common
@@ -41,13 +46,13 @@ literals = mkPattern' match
   match (JSStringLiteral s) = return $ string s
   match (JSBooleanLiteral True) = return "true"
   match (JSBooleanLiteral False) = return "false"
-  match (JSArrayLiteral xs) = fmap concat $ sequence
+  match (JSArrayLiteral xs) = concat <$> sequence
     [ return "[ "
-    , fmap (intercalate ", ") $ forM xs prettyPrintJS'
+    , intercalate ", " <$> forM xs prettyPrintJS'
     , return " ]"
     ]
   match (JSObjectLiteral []) = return "{}"
-  match (JSObjectLiteral ps) = fmap concat $ sequence
+  match (JSObjectLiteral ps) = concat <$> sequence
     [ return "{\n"
     , withIndent $ do
         jss <- forM ps $ \(key, value) -> fmap ((objectPropertyToString key ++ ": ") ++) . prettyPrintJS' $ value
@@ -61,7 +66,7 @@ literals = mkPattern' match
     objectPropertyToString :: String -> String
     objectPropertyToString s | identNeedsEscaping s = show s
                              | otherwise = s
-  match (JSBlock sts) = fmap concat $ sequence
+  match (JSBlock sts) = concat <$> sequence
     [ return "{\n"
     , withIndent $ prettyStatements sts
     , return "\n"
@@ -69,23 +74,23 @@ literals = mkPattern' match
     , return "}"
     ]
   match (JSVar ident) = return ident
-  match (JSVariableIntroduction ident value) = fmap concat $ sequence
+  match (JSVariableIntroduction ident value) = concat <$> sequence
     [ return "var "
     , return ident
     , maybe (return "") (fmap (" = " ++) . prettyPrintJS') value
     ]
-  match (JSAssignment target value) = fmap concat $ sequence
+  match (JSAssignment target value) = concat <$> sequence
     [ prettyPrintJS' target
     , return " = "
     , prettyPrintJS' value
     ]
-  match (JSWhile cond sts) = fmap concat $ sequence
+  match (JSWhile cond sts) = concat <$> sequence
     [ return "while ("
     , prettyPrintJS' cond
     , return ") "
     , prettyPrintJS' sts
     ]
-  match (JSFor ident start end sts) = fmap concat $ sequence
+  match (JSFor ident start end sts) = concat <$> sequence
     [ return $ "for (var " ++ ident ++ " = "
     , prettyPrintJS' start
     , return $ "; " ++ ident ++ " < "
@@ -93,30 +98,30 @@ literals = mkPattern' match
     , return $ "; " ++ ident ++ "++) "
     , prettyPrintJS' sts
     ]
-  match (JSForIn ident obj sts) = fmap concat $ sequence
+  match (JSForIn ident obj sts) = concat <$> sequence
     [ return $ "for (var " ++ ident ++ " in "
     , prettyPrintJS' obj
     , return ") "
     , prettyPrintJS' sts
     ]
-  match (JSIfElse cond thens elses) = fmap concat $ sequence
+  match (JSIfElse cond thens elses) = concat <$> sequence
     [ return "if ("
     , prettyPrintJS' cond
     , return ") "
     , prettyPrintJS' thens
     , maybe (return "") (fmap (" else " ++) . prettyPrintJS') elses
     ]
-  match (JSReturn value) = fmap concat $ sequence
+  match (JSReturn value) = concat <$> sequence
     [ return "return "
     , prettyPrintJS' value
     ]
-  match (JSThrow value) = fmap concat $ sequence
+  match (JSThrow value) = concat <$> sequence
     [ return "throw "
     , prettyPrintJS' value
     ]
   match (JSBreak lbl) = return $ "break " ++ lbl
   match (JSContinue lbl) = return $ "continue " ++ lbl
-  match (JSLabel lbl js) = fmap concat $ sequence
+  match (JSLabel lbl js) = concat <$> sequence
     [ return $ lbl ++ ": "
     , prettyPrintJS' js
     ]
@@ -135,16 +140,16 @@ literals = mkPattern' match
     commentLines :: Comment -> [String]
     commentLines (LineComment s) = [s]
     commentLines (BlockComment s) = lines s
-    
-    asLine :: String -> StateT PrinterState Maybe String 
+
+    asLine :: String -> StateT PrinterState Maybe String
     asLine s = do
       i <- currentIndent
       return $ i ++ " * " ++ removeComments s ++ "\n"
-    
+
     removeComments :: String -> String
     removeComments ('*' : '/' : s) = removeComments s
     removeComments (c : s) = c : removeComments s
-    
+
     removeComments [] = []
   match (JSRaw js) = return js
   match _ = mzero
@@ -163,6 +168,7 @@ string s = '"' : concatMap encodeChar s ++ "\""
   encodeChar '\\' = "\\\\"
   encodeChar c | fromEnum c > 0xFFF = "\\u" ++ showHex (fromEnum c) ""
   encodeChar c | fromEnum c > 0xFF = "\\u0" ++ showHex (fromEnum c) ""
+  encodeChar c | fromEnum c > 0x7E || fromEnum c < 0x20 = "\\x" ++ showHex (fromEnum c) ""
   encodeChar c = [c]
 
 conditional :: Pattern PrinterState JS ((JS, JS), JS)
@@ -246,13 +252,13 @@ prettyStatements sts = do
 -- Generate a pretty-printed string representing a Javascript expression
 --
 prettyPrintJS1 :: JS -> String
-prettyPrintJS1 = fromMaybe (error "Incomplete pattern") . flip evalStateT (PrinterState 0) . prettyPrintJS'
+prettyPrintJS1 = fromMaybe (internalError "Incomplete pattern") . flip evalStateT (PrinterState 0) . prettyPrintJS'
 
 -- |
 -- Generate a pretty-printed string representing a collection of Javascript expressions at the same indentation level
 --
 prettyPrintJS :: [JS] -> String
-prettyPrintJS = fromMaybe (error "Incomplete pattern") . flip evalStateT (PrinterState 0) . prettyStatements
+prettyPrintJS = fromMaybe (internalError "Incomplete pattern") . flip evalStateT (PrinterState 0) . prettyStatements
 
 -- |
 -- Generate an indented, pretty-printed string representing a Javascript expression
@@ -272,26 +278,26 @@ prettyPrintJS' = A.runKleisli $ runPattern matchValue
                         ++ fromMaybe "" name
                         ++ "(" ++ intercalate ", " args ++ ") "
                         ++ ret ]
-                  , [ binary    LessThan             "<" ]
-                  , [ binary    LessThanOrEqualTo    "<=" ]
-                  , [ binary    GreaterThan          ">" ]
-                  , [ binary    GreaterThanOrEqualTo ">=" ]
                   , [ Wrap typeOf $ \_ s -> "typeof " ++ s ]
-                  , [ AssocR instanceOf $ \v1 v2 -> v1 ++ " instanceof " ++ v2 ]
-                  , [ unary     Not                  "!" ]
-                  , [ unary     BitwiseNot           "~" ]
-                  , [ negateOperator ]
-                  , [ unary     Positive             "+" ]
+                  , [ unary     Not                  "!"
+                    , unary     BitwiseNot           "~"
+                    , unary     Positive             "+"
+                    , negateOperator ]
                   , [ binary    Multiply             "*"
                     , binary    Divide               "/"
                     , binary    Modulus              "%" ]
                   , [ binary    Add                  "+"
                     , binary    Subtract             "-" ]
-                  , [ binary    ShiftLeft            "<<" ]
-                  , [ binary    ShiftRight           ">>" ]
-                  , [ binary    ZeroFillShiftRight   ">>>" ]
-                  , [ binary    EqualTo              "===" ]
-                  , [ binary    NotEqualTo           "!==" ]
+                  , [ binary    ShiftLeft            "<<"
+                    , binary    ShiftRight           ">>"
+                    , binary    ZeroFillShiftRight   ">>>" ]
+                  , [ binary    LessThan             "<"
+                    , binary    LessThanOrEqualTo    "<="
+                    , binary    GreaterThan          ">"
+                    , binary    GreaterThanOrEqualTo ">="
+                    , AssocR instanceOf $ \v1 v2 -> v1 ++ " instanceof " ++ v2 ]
+                  , [ binary    EqualTo              "==="
+                    , binary    NotEqualTo           "!==" ]
                   , [ binary    BitwiseAnd           "&" ]
                   , [ binary    BitwiseXor           "^" ]
                   , [ binary    BitwiseOr            "|" ]

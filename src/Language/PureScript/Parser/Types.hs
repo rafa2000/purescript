@@ -32,11 +32,16 @@ import Language.PureScript.Environment
 import qualified Text.Parsec as P
 import qualified Text.Parsec.Expr as P
 
+-- TODO: remove these deprecation warnings in 0.8
 parseArray :: TokenParser Type
-parseArray = squares $ return tyArray
+parseArray = do
+  _ <- squares $ return tyArray
+  featureWasRemoved "Array notation is no longer supported. Use Array instead of []."
 
 parseArrayOf :: TokenParser Type
-parseArrayOf = squares $ TypeApp tyArray <$> parseType
+parseArrayOf = do
+  _ <- squares $ TypeApp tyArray <$> parseType
+  featureWasRemoved "Array notation is no longer supported. Use Array _ instead of [_]."
 
 parseFunction :: TokenParser Type
 parseFunction = parens $ rarrow >> return tyFunction
@@ -45,7 +50,7 @@ parseObject :: TokenParser Type
 parseObject = braces $ TypeApp tyObject <$> parseRow
 
 parseTypeWildcard :: TokenParser Type
-parseTypeWildcard = reserved "_" >> return TypeWildcard
+parseTypeWildcard = underscore >> return TypeWildcard
 
 parseTypeVariable :: TokenParser Type
 parseTypeVariable = do
@@ -58,7 +63,7 @@ parseTypeConstructor = TypeConstructor <$> parseQualified properName
 
 parseForAll :: TokenParser Type
 parseForAll = mkForAll <$> (P.try (reserved "forall") *> P.many1 (indented *> identifier) <* indented <* dot)
-                       <*> parseConstrainedType
+                       <*> parseType
 
 -- |
 -- Parse a type as it appears in e.g. a data constructor
@@ -74,21 +79,21 @@ parseTypeAtom = indented *> P.choice (map P.try
             , parseTypeConstructor
             , parseForAll
             , parens parseRow
-            , parens parsePolyType ])
+            , parseConstrainedType
+            , parens parsePolyType
+            ])
 
 parseConstrainedType :: TokenParser Type
 parseConstrainedType = do
-  constraints <- P.optionMaybe . P.try $ do
-    constraints <- parens . commaSep1 $ do
-      className <- parseQualified properName
-      indented
-      ty <- P.many parseTypeAtom
-      return (className, ty)
-    _ <- rfatArrow
-    return constraints
+  constraints <- parens . commaSep1 $ do
+    className <- parseQualified properName
+    indented
+    ty <- P.many parseTypeAtom
+    return (className, ty)
+  _ <- rfatArrow
   indented
   ty <- parseType
-  return $ maybe ty (flip ConstrainedType ty) constraints
+  return $ ConstrainedType constraints ty
 
 parseAnyType :: TokenParser Type
 parseAnyType = P.buildExpressionParser operators (buildPostfixParser postfixTable parseTypeAtom) P.<?> "type"
@@ -126,9 +131,7 @@ parseNameAndType :: TokenParser t -> TokenParser (String, t)
 parseNameAndType p = (,) <$> (indented *> (lname <|> stringLiteral) <* indented <* doubleColon) <*> p
 
 parseRowEnding :: TokenParser Type
-parseRowEnding = P.option REmpty $ indented *> pipe *> indented *> P.choice  (map P.try
-            [ parseTypeWildcard
-            , TypeVar <$> identifier ])
+parseRowEnding = P.option REmpty $ indented *> pipe *> indented *> parseType
 
 parseRow :: TokenParser Type
 parseRow = (curry rowFromList <$> commaSep (parseNameAndType parsePolyType) <*> parseRowEnding) P.<?> "row"

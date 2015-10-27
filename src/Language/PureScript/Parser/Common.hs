@@ -27,6 +27,11 @@ import Language.PureScript.Names
 
 import qualified Text.Parsec as P
 
+featureWasRemoved :: String -> TokenParser a
+featureWasRemoved err = do
+  pos <- P.getPosition
+  error $ "It looks like you are trying to use a feature from a previous version of the compiler:\n" ++ err ++ "\nat " ++ show pos
+
 properName :: TokenParser ProperName
 properName = ProperName <$> uname
 
@@ -87,12 +92,6 @@ buildPostfixParser fs first = do
     case maybeA of
       Nothing -> return a
       Just a' -> go a'
-
--- |
--- Parse an identifier in backticks or an operator
---
-parseIdentInfix :: TokenParser (Qualified Ident)
-parseIdentInfix = P.between tick tick (parseQualified (Ident <$> identifier)) <|> (parseQualified (Op <$> symbol))
 
 -- |
 -- Mark the current indentation level

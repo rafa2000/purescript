@@ -1,4 +1,9 @@
+-- @shouldFailWith OverlappingArgNames
 module OverlappingBinders where
 
+import Prelude
+
+data S a = S a (S a)
+
 f x = case x of
-  (y:y@(z:zs)) -> y
+  (S y (S y@(S z zs))) -> y

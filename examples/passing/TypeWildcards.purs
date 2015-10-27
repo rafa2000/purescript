@@ -1,7 +1,9 @@
 module Main where
 
+import Prelude
+
 testTopLevel :: _ -> _
-testTopLevel n = n + 1
+testTopLevel n = n + 1.0
 
 test :: forall a. (Eq a) => (a -> a) -> a -> a
 test f a = go (f a) a
@@ -10,4 +12,4 @@ test f a = go (f a) a
   go a1 a2 | a1 == a2 = a1
   go a1 _ = go (f a1) a1
 
-main = Debug.Trace.trace "Done"
+main = Control.Monad.Eff.Console.log "Done"

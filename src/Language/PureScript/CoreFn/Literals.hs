@@ -13,6 +13,7 @@
 -----------------------------------------------------------------------------
 
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveFunctor #-}
 
 module Language.PureScript.CoreFn.Literals where
 
@@ -32,6 +33,10 @@ data Literal a
   --
   | StringLiteral String
   -- |
+  -- A character literal
+  --
+  | CharLiteral Char
+  -- |
   -- A boolean literal
   --
   | BooleanLiteral Bool
@@ -42,4 +47,4 @@ data Literal a
   -- |
   -- An object literal
   --
-  | ObjectLiteral [(String, a)] deriving (Show, D.Data, D.Typeable)
+  | ObjectLiteral [(String, a)] deriving (Show, Read, D.Data, D.Typeable, Functor)

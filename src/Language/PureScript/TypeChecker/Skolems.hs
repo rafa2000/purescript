@@ -13,6 +13,8 @@
 --
 -----------------------------------------------------------------------------
 
+{-# LANGUAGE CPP #-}
+
 module Language.PureScript.TypeChecker.Skolems (
     newSkolemConstant,
     introduceSkolemScope,
@@ -25,13 +27,15 @@ module Language.PureScript.TypeChecker.Skolems (
 import Data.List (nub, (\\))
 import Data.Monoid
 
+#if __GLASGOW_HASKELL__ < 710
 import Control.Applicative
-import Control.Monad.Error
+#endif
+import Control.Monad.Error.Class (MonadError(..))
 import Control.Monad.Unify
 
+import Language.PureScript.Crash
 import Language.PureScript.AST
 import Language.PureScript.Errors
-import Language.PureScript.Pretty
 import Language.PureScript.TypeChecker.Monad
 import Language.PureScript.Types
 
@@ -68,10 +72,16 @@ skolemize ident sko scope = replaceTypeVars ident (Skolem ident sko scope)
 -- only example of scoped type variables.
 --
 skolemizeTypesInValue :: String -> Int -> SkolemScope -> Expr -> Expr
-skolemizeTypesInValue ident sko scope = let (_, f, _) = everywhereOnValues id go id in f
+skolemizeTypesInValue ident sko scope = let (_, f, _) = everywhereOnValues id onExpr onBinder in f
   where
-  go (SuperClassDictionary c ts) = SuperClassDictionary c (map (skolemize ident sko scope) ts)
-  go other = other
+  onExpr :: Expr -> Expr
+  onExpr (SuperClassDictionary c ts) = SuperClassDictionary c (map (skolemize ident sko scope) ts)
+  onExpr (TypedValue check val ty) = TypedValue check val (skolemize ident sko scope ty)
+  onExpr other = other
+
+  onBinder :: Binder -> Binder
+  onBinder (TypedBinder ty b) = TypedBinder (skolemize ident sko scope ty) b
+  onBinder other = other
 
 -- |
 -- Ensure skolem variables do not escape their scope
@@ -88,7 +98,7 @@ skolemEscapeCheck root@TypedValue{} =
   let (_, f, _, _, _) = everythingWithContextOnValues [] [] (++) def go def def def
   in case f root of
        [] -> return ()
-       ((binding, val) : _) -> throwError $ mkErrorStack ("Rigid/skolem type variable " ++ maybe "" (("bound by " ++) . prettyPrintValue) binding ++ " has escaped.") (Just (ExprError val))
+       ((binding, val) : _) -> throwError . singleError $ ErrorMessage [ ErrorInExpression val ] $ EscapedSkolem binding
   where
   def s _ = (s, [])
 
@@ -111,4 +121,4 @@ skolemEscapeCheck root@TypedValue{} =
     where
     go' val@(TypedValue _ _ (ForAll _ _ (Just sco'))) | sco == sco' = First (Just val)
     go' _ = mempty
-skolemEscapeCheck val = throwError $ mkErrorStack "Untyped value passed to skolemEscapeCheck" (Just (ExprError val))
+skolemEscapeCheck _ = internalError "Untyped value passed to skolemEscapeCheck"

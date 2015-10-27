@@ -19,7 +19,8 @@ module Language.PureScript.TypeChecker.Rows (
 
 import Data.List
 
-import Control.Monad.Error
+import Control.Monad
+import Control.Monad.Error.Class (MonadError(..))
 
 import Language.PureScript.AST
 import Language.PureScript.Errors
@@ -45,7 +46,6 @@ checkDuplicateLabels =
     where
     checkDups :: Type -> Check ()
     checkDups (TypeApp t1 t2) = checkDups t1 >> checkDups t2
-    checkDups (SaturatedTypeSynonym _ ts) = mapM_ checkDups ts
     checkDups (ForAll _ t _) = checkDups t
     checkDups (ConstrainedType args t) = do
       mapM_ checkDups $ concatMap snd args
@@ -53,7 +53,7 @@ checkDuplicateLabels =
     checkDups r@RCons{} =
       let (ls, _) = rowToList r in
       case firstDup . sort . map fst $ ls of
-        Just l -> throwError $ mkErrorStack ("Duplicate label " ++ show l ++ " in row") $ Just (ExprError val)
+        Just l -> throwError . errorMessage $ DuplicateLabel l (Just val)
         Nothing -> return ()
     checkDups _ = return ()
 

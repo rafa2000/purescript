@@ -1,8 +1,10 @@
 module Main where
-  
-foo = bar 
-  where bar r = r + 1
 
-r = foo 2
+import Prelude
 
-main = Debug.Trace.trace "Done"
+foo = bar
+  where bar r = r + 1.0
+
+r = foo 2.0
+
+main = Control.Monad.Eff.Console.log "Done"

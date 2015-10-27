@@ -21,6 +21,7 @@ import qualified Data.Data as D
 import Language.PureScript.AST.SourcePos
 import Language.PureScript.Names
 import Language.PureScript.Comments
+import Language.PureScript.Types
 
 -- |
 -- Data type for binders
@@ -38,6 +39,10 @@ data Binder
   -- A binder which matches a string literal
   --
   | StringBinder String
+  -- |
+  -- A binder which matches a character literal
+  --
+  | CharBinder Char
   -- |
   -- A binder which matches a numeric literal
   --
@@ -59,17 +64,17 @@ data Binder
   --
   | ArrayBinder [Binder]
   -- |
-  -- A binder which matches an array and binds its head and tail
-  --
-  | ConsBinder Binder Binder
-  -- |
   -- A binder which binds its input to an identifier
   --
   | NamedBinder Ident Binder
   -- |
   -- A binder with source position information
   --
-  | PositionedBinder SourceSpan [Comment] Binder deriving (Show, D.Data, D.Typeable)
+  | PositionedBinder SourceSpan [Comment] Binder
+  -- |
+  -- A binder with a type annotation
+  --
+  | TypedBinder Type Binder deriving (Show, Read, Eq, D.Data, D.Typeable)
 
 -- |
 -- Collect all names introduced in binders in an expression
@@ -81,7 +86,7 @@ binderNames = go []
   go ns (ConstructorBinder _ bs) = foldl go ns bs
   go ns (ObjectBinder bs) = foldl go ns (map snd bs)
   go ns (ArrayBinder bs) = foldl go ns bs
-  go ns (ConsBinder b1 b2) = go (go ns b1) b2
   go ns (NamedBinder name b) = go (name : ns) b
   go ns (PositionedBinder _ _ b) = go ns b
+  go ns (TypedBinder _ b) = go ns b
   go ns _ = ns

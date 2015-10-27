@@ -2,7 +2,7 @@
 --
 -- Module      :  Main
 -- Copyright   :  (c) Hardy Jones 2014
--- License     :  MIT
+-- License     :  MIT (http://opensource.org/licenses/MIT)
 --
 -- Maintainer  :  Hardy Jones <jones3.hardy@gmail.com>
 -- Stability   :  experimental
@@ -12,6 +12,8 @@
 -- Generate Directed Graphs of PureScript TypeClasses
 --
 -----------------------------------------------------------------------------
+
+{-# LANGUAGE TupleSections #-}
 
 module Main where
 
@@ -24,15 +26,12 @@ import Data.Version (showVersion)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
+import System.FilePath.Glob (glob)
 import System.Exit (exitFailure, exitSuccess)
-import System.IO (stderr)
-
-import Text.Parsec as Par (ParseError)
+import System.IO (hPutStr, stderr)
 
 import qualified Language.PureScript as P
 import qualified Paths_purescript as Paths
-import qualified System.IO.UTF8 as U
-
 
 data HierarchyOptions = HierarchyOptions
   { hierachyInput   :: FilePath
@@ -54,18 +53,19 @@ instance Ord SuperMap where
 runModuleName :: P.ModuleName -> String
 runModuleName (P.ModuleName pns) = intercalate "_" (P.runProperName `map` pns)
 
-readInput :: FilePath -> IO (Either Par.ParseError [P.Module])
-readInput filename = do
-  content <- U.readFile filename
-  return $ fmap (map snd) $ P.parseModulesFromFiles id [(filename, content)]
+readInput :: [FilePath] -> IO (Either P.MultipleErrors [P.Module])
+readInput paths = do
+  content <- mapM (\path -> (path, ) <$> readFile path) paths
+  return $ map snd <$> P.parseModulesFromFiles id content
 
 compile :: HierarchyOptions -> IO ()
-compile (HierarchyOptions input mOutput) = do
+compile (HierarchyOptions inputGlob mOutput) = do
+  input <- glob inputGlob
   modules <- readInput input
   case modules of
-    Left err -> U.hPutStr stderr (show err) >> exitFailure
+    Left errs -> hPutStr stderr (P.prettyPrintMultipleErrors False errs) >> exitFailure
     Right ms -> do
-      for_ ms $ \(P.Module moduleName decls _) ->
+      for_ ms $ \(P.Module _ _ moduleName decls _) ->
         let name = runModuleName moduleName
             tcs = filter P.isTypeClassDeclaration decls
             supers = sort . nub . filter (not . null) $ fmap superClasses tcs
@@ -76,8 +76,8 @@ compile (HierarchyOptions input mOutput) = do
         in unless (null supers) $ case mOutput of
           Just output -> do
             createDirectoryIfMissing True output
-            U.writeFile (output </> name) hier
-          Nothing -> U.putStrLn hier
+            writeFile (output </> name) hier
+          Nothing -> putStrLn hier
       exitSuccess
 
 superClasses :: P.Declaration -> [SuperMap]

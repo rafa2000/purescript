@@ -1,8 +1,8 @@
 -----------------------------------------------------------------------------
 --
 -- Module      :  Language.PureScript.AST.Declarations
--- Copyright   :  (c) 2013-14 Phil Freeman, (c) 2014 Gary Burgess, and other contributors
--- License     :  MIT
+-- Copyright   :  (c) 2013-15 Phil Freeman, (c) 2014-15 Gary Burgess
+-- License     :  MIT (http://opensource.org/licenses/MIT)
 --
 -- Maintainer  :  Phil Freeman <paf31@cantab.net>
 -- Stability   :  experimental
@@ -12,11 +12,23 @@
 --
 -----------------------------------------------------------------------------
 
-{-# LANGUAGE DeriveDataTypeable, ScopedTypeVariables #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE CPP #-}
 
 module Language.PureScript.AST.Declarations where
 
+import Data.Aeson.TH
+
 import qualified Data.Data as D
+import qualified Data.Map as M
+
+import Control.Monad.Identity
+
+#if __GLASGOW_HASKELL__ < 710
+import Control.Applicative
+#endif
 
 import Language.PureScript.AST.Binders
 import Language.PureScript.AST.Operators
@@ -26,65 +38,18 @@ import Language.PureScript.Names
 import Language.PureScript.Kinds
 import Language.PureScript.TypeClassDictionaries
 import Language.PureScript.Comments
-import Language.PureScript.CodeGen.JS.AST
 import Language.PureScript.Environment
 
 -- |
--- A module declaration, consisting of a module name, a list of declarations, and a list of the
--- declarations that are explicitly exported. If the export list is Nothing, everything is exported.
+-- A module declaration, consisting of comments about the module, a module name,
+-- a list of declarations, and a list of the declarations that are
+-- explicitly exported. If the export list is Nothing, everything is exported.
 --
-data Module = Module ModuleName [Declaration] (Maybe [DeclarationRef]) deriving (Show, D.Data, D.Typeable)
+data Module = Module SourceSpan [Comment] ModuleName [Declaration] (Maybe [DeclarationRef]) deriving (Show, Read, D.Data, D.Typeable)
 
 -- | Return a module's name.
 getModuleName :: Module -> ModuleName
-getModuleName (Module name _ _) = name
-
--- |
--- Test if a declaration is exported, given a module's export list.
---
-isExported :: Maybe [DeclarationRef] -> Declaration -> Bool
-isExported Nothing _ = True
-isExported _ TypeInstanceDeclaration{} = True
-isExported exps (PositionedDeclaration _ _ d) = isExported exps d
-isExported (Just exps) decl = any (matches decl) exps
-  where
-  matches (TypeDeclaration ident _) (ValueRef ident') = ident == ident'
-  matches (ValueDeclaration ident _ _ _) (ValueRef ident') = ident == ident'
-  matches (ExternDeclaration _ ident _ _) (ValueRef ident') = ident == ident'
-  matches (DataDeclaration _ ident _ _) (TypeRef ident' _) = ident == ident'
-  matches (ExternDataDeclaration ident _) (TypeRef ident' _) = ident == ident'
-  matches (TypeSynonymDeclaration ident _ _) (TypeRef ident' _) = ident == ident'
-  matches (TypeClassDeclaration ident _ _ _) (TypeClassRef ident') = ident == ident'
-  matches (PositionedDeclaration _ _ d) r = d `matches` r
-  matches d (PositionedDeclarationRef _ _ r) = d `matches` r
-  matches _ _ = False
-
-exportedDeclarations :: Module -> [Declaration]
-exportedDeclarations (Module _ decls exps) = filter (isExported exps) (flattenDecls decls)
-
--- |
--- Test if a data constructor for a given type is exported, given a module's export list.
---
-isDctorExported :: ProperName -> Maybe [DeclarationRef] -> ProperName -> Bool
-isDctorExported _ Nothing _ = True
-isDctorExported ident (Just exps) ctor = test `any` exps
-  where
-  test (PositionedDeclarationRef _ _ d) = test d
-  test (TypeRef ident' Nothing) = ident == ident'
-  test (TypeRef ident' (Just ctors)) = ident == ident' && ctor `elem` ctors
-  test _ = False
-
--- |
--- Return the exported data constructors for a given type.
---
-exportedDctors :: Module -> ProperName -> [ProperName]
-exportedDctors (Module _ decls exps) ident =
-  filter (isDctorExported ident exps) dctors
-  where
-  dctors = concatMap getDctors (flattenDecls decls)
-  getDctors (DataDeclaration _ _ _ ctors) = map fst ctors
-  getDctors (PositionedDeclaration _ _ d) = getDctors d
-  getDctors _ = []
+getModuleName (Module _ _ name _ _) = name
 
 -- |
 -- An item in a list of explicit imports or exports
@@ -107,37 +72,46 @@ data DeclarationRef
   --
   | TypeInstanceRef Ident
   -- |
+  -- A module, in its entirety
+  --
+  | ModuleRef ModuleName
+  -- |
   -- A declaration reference with source position information
   --
   | PositionedDeclarationRef SourceSpan [Comment] DeclarationRef
-  deriving (Show, D.Data, D.Typeable)
+  deriving (Show, Read, D.Data, D.Typeable)
 
 instance Eq DeclarationRef where
   (TypeRef name dctors)  == (TypeRef name' dctors') = name == name' && dctors == dctors'
   (ValueRef name)        == (ValueRef name')        = name == name'
   (TypeClassRef name)    == (TypeClassRef name')    = name == name'
   (TypeInstanceRef name) == (TypeInstanceRef name') = name == name'
+  (ModuleRef name) == (ModuleRef name') = name == name'
   (PositionedDeclarationRef _ _ r) == r' = r == r'
   r == (PositionedDeclarationRef _ _ r') = r == r'
   _ == _ = False
+
+isModuleRef :: DeclarationRef -> Bool
+isModuleRef (ModuleRef _) = True
+isModuleRef _ = False
 
 -- |
 -- The data type which specifies type of import declaration
 --
 data ImportDeclarationType
   -- |
-  -- Unqualified import
+  -- An import with no explicit list: `import M`
   --
-  = Unqualified
+  = Implicit
   -- |
-  -- Qualified import with a list of references to import
+  -- An import with an explicit list of references to import: `import M (foo)`
   --
-  | Qualifying [DeclarationRef]
+  | Explicit [DeclarationRef]
   -- |
-  -- Import with hiding clause with a list of references to hide
+  -- An import with a list of references to hide: `import M hiding (foo)`
   --
   | Hiding [DeclarationRef]
-  deriving (Show, D.Data, D.Typeable)
+  deriving (Show, Read, D.Data, D.Typeable)
 
 -- |
 -- The data type of declarations
@@ -168,17 +142,13 @@ data Declaration
   --
   | BindingGroupDeclaration [(Ident, NameKind, Expr)]
   -- |
-  -- A foreign import declaration (type, name, optional inline Javascript, type)
+  -- A foreign import declaration (name, type)
   --
-  | ExternDeclaration ForeignImportType Ident (Maybe JS) Type
+  | ExternDeclaration Ident Type
   -- |
   -- A data type foreign import (name, kind)
   --
   | ExternDataDeclaration ProperName Kind
-  -- |
-  -- A type class instance foreign import
-  --
-  | ExternInstanceDeclaration Ident [Constraint] (Qualified ProperName) [Type]
   -- |
   -- A fixity declaration (fixity data, operator name)
   --
@@ -195,12 +165,28 @@ data Declaration
   -- A type instance declaration (name, dependencies, class name, instance types, member
   -- declarations)
   --
-  | TypeInstanceDeclaration Ident [Constraint] (Qualified ProperName) [Type] [Declaration]
+  | TypeInstanceDeclaration Ident [Constraint] (Qualified ProperName) [Type] TypeInstanceBody
   -- |
   -- A declaration with source position information
   --
   | PositionedDeclaration SourceSpan [Comment] Declaration
-  deriving (Show, D.Data, D.Typeable)
+  deriving (Show, Read, D.Data, D.Typeable)
+
+-- | The members of a type class instance declaration
+data TypeInstanceBody
+  -- | This is a derived instance
+  = DerivedInstance
+  -- | This is a regular (explicit) instance
+  | ExplicitInstance [Declaration]
+  deriving (Show, Read, D.Data, D.Typeable)
+
+mapTypeInstanceBody :: ([Declaration] -> [Declaration]) -> TypeInstanceBody -> TypeInstanceBody
+mapTypeInstanceBody f = runIdentity . traverseTypeInstanceBody (Identity . f)
+
+-- | A traversal for TypeInstanceBody
+traverseTypeInstanceBody :: (Applicative f) => ([Declaration] -> f [Declaration]) -> TypeInstanceBody -> f TypeInstanceBody
+traverseTypeInstanceBody _ DerivedInstance = pure DerivedInstance
+traverseTypeInstanceBody f (ExplicitInstance ds) = ExplicitInstance <$> f ds
 
 -- |
 -- Test if a declaration is a value declaration
@@ -236,14 +222,6 @@ isExternDataDecl (PositionedDeclaration _ _ d) = isExternDataDecl d
 isExternDataDecl _ = False
 
 -- |
--- Test if a declaration is a type class instance foreign import
---
-isExternInstanceDecl :: Declaration -> Bool
-isExternInstanceDecl ExternInstanceDeclaration{} = True
-isExternInstanceDecl (PositionedDeclaration _ _ d) = isExternInstanceDecl d
-isExternInstanceDecl _ = False
-
--- |
 -- Test if a declaration is a fixity declaration
 --
 isFixityDecl :: Declaration -> Bool
@@ -260,11 +238,18 @@ isExternDecl (PositionedDeclaration _ _ d) = isExternDecl d
 isExternDecl _ = False
 
 -- |
--- Test if a declaration is a type class or instance declaration
+-- Test if a declaration is a type class instance declaration
+--
+isTypeClassInstanceDeclaration :: Declaration -> Bool
+isTypeClassInstanceDeclaration TypeInstanceDeclaration{} = True
+isTypeClassInstanceDeclaration (PositionedDeclaration _ _ d) = isTypeClassInstanceDeclaration d
+isTypeClassInstanceDeclaration _ = False
+
+-- |
+-- Test if a declaration is a type class declaration
 --
 isTypeClassDeclaration :: Declaration -> Bool
 isTypeClassDeclaration TypeClassDeclaration{} = True
-isTypeClassDeclaration TypeInstanceDeclaration{} = True
 isTypeClassDeclaration (PositionedDeclaration _ _ d) = isTypeClassDeclaration d
 isTypeClassDeclaration _ = False
 
@@ -294,6 +279,10 @@ data Expr
   --
   | StringLiteral String
   -- |
+  -- A character literal
+  --
+  | CharLiteral Char
+  -- |
   -- A boolean literal
   --
   | BooleanLiteral Bool
@@ -305,12 +294,17 @@ data Expr
   -- Binary operator application. During the rebracketing phase of desugaring, this data constructor
   -- will be removed.
   --
-  | BinaryNoParens (Qualified Ident) Expr Expr
+  | BinaryNoParens Expr Expr Expr
   -- |
   -- Explicit parentheses. During the rebracketing phase of desugaring, this data constructor
   -- will be removed.
   --
   | Parens Expr
+  -- |
+  -- Operator section. This will be removed during desugaring and replaced with a partially applied
+  -- operator or lambda to flip the arguments.
+  --
+  | OperatorSection Expr (Either Expr Expr)
   -- |
   -- An array literal
   --
@@ -320,6 +314,16 @@ data Expr
   --
   | ObjectLiteral [(String, Expr)]
   -- |
+  -- An object constructor (object literal with underscores). This will be removed during
+  -- desugaring and expanded into a lambda that returns an object literal.
+  --
+  | ObjectConstructor [(String, Maybe Expr)]
+  -- |
+  -- An object property getter (e.g. `_.x`). This will be removed during
+  -- desugaring and expanded into a lambda that reads a property from an object.
+  --
+  | ObjectGetter String
+  -- |
   -- An record property accessor expression
   --
   | Accessor String Expr
@@ -327,6 +331,11 @@ data Expr
   -- Partial record update
   --
   | ObjectUpdate Expr [(String, Expr)]
+  -- |
+  -- Partial record updater. This will be removed during desugaring and
+  -- expanded into a lambda that returns an object update.
+  --
+  | ObjectUpdater (Maybe Expr) [(String, Maybe Expr)]
   -- |
   -- Function introduction
   --
@@ -376,7 +385,11 @@ data Expr
   -- at superclass implementations when searching for a dictionary, the type class name and
   -- instance type, and the type class dictionaries in scope.
   --
-  | TypeClassDictionary Bool Constraint [TypeClassDictionaryInScope]
+  | TypeClassDictionary Constraint (M.Map (Maybe ModuleName) (M.Map (Qualified ProperName) (M.Map (Qualified Ident) TypeClassDictionaryInScope)))
+  -- |
+  -- A typeclass dictionary accessor, the implementation is left unspecified until CoreFn desugaring.
+  --
+  | TypeClassDictionaryAccessor (Qualified ProperName) Ident
   -- |
   -- A placeholder for a superclass dictionary to be turned into a TypeClassDictionary during typechecking
   --
@@ -384,7 +397,7 @@ data Expr
   -- |
   -- A value with source position information
   --
-  | PositionedValue SourceSpan [Comment] Expr deriving (Show, D.Data, D.Typeable)
+  | PositionedValue SourceSpan [Comment] Expr deriving (Show, Read, D.Data, D.Typeable)
 
 -- |
 -- An alternative in a case statement
@@ -398,7 +411,7 @@ data CaseAlternative = CaseAlternative
     -- The result expression or a collect of guarded expressions
     --
   , caseAlternativeResult :: Either [(Guard, Expr)] Expr
-  } deriving (Show, D.Data, D.Typeable)
+  } deriving (Show, Read, D.Data, D.Typeable)
 
 -- |
 -- A statement in a do-notation block
@@ -419,4 +432,7 @@ data DoNotationElement
   -- |
   -- A do notation element with source position information
   --
-  | PositionedDoNotationElement SourceSpan [Comment] DoNotationElement deriving (Show, D.Data, D.Typeable)
+  | PositionedDoNotationElement SourceSpan [Comment] DoNotationElement deriving (Show, Read, D.Data, D.Typeable)
+
+$(deriveJSON (defaultOptions { sumEncoding = ObjectWithSingleField }) ''DeclarationRef)
+$(deriveJSON (defaultOptions { sumEncoding = ObjectWithSingleField }) ''ImportDeclarationType)

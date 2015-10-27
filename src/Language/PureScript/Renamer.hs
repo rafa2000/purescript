@@ -14,9 +14,15 @@
 --
 -----------------------------------------------------------------------------
 
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE CPP #-}
+
 module Language.PureScript.Renamer (renameInModules) where
 
+#if __GLASGOW_HASKELL__ < 710
 import Control.Applicative
+#endif
 import Control.Monad.State
 
 import Data.List (find)
@@ -74,13 +80,12 @@ updateScope :: Ident -> Rename Ident
 updateScope i@(Ident name) | name == C.__unused = return i
 updateScope name = do
   scope <- get
-  let name' = case name `S.member` rsUsedNames scope of
-                True ->
-                  let
-                    newNames = [ Ident (runIdent name ++ "_" ++ show (i :: Int)) | i <- [1..] ]
-                    Just newName = find (`S.notMember` rsUsedNames scope) newNames
-                  in newName
-                False -> name
+  name' <- if name `S.member` rsUsedNames scope
+             then do
+               let newNames = [ Ident (runIdent name ++ "_" ++ show (i :: Int)) | i <- [1..] ]
+                   Just newName = find (`S.notMember` rsUsedNames scope) newNames
+               return newName
+             else return name
   modify $ \s -> s { rsBoundNames = M.insert name name' (rsBoundNames s)
                    , rsUsedNames  = S.insert name' (rsUsedNames s)
                    }
@@ -95,7 +100,7 @@ lookupIdent name = do
   name' <- gets $ M.lookup name . rsBoundNames
   case name' of
     Just name'' -> return name''
-    Nothing -> error $ "Rename scope is missing ident '" ++ show name ++ "'"
+    Nothing -> error $ "Rename scope is missing ident '" ++ showIdent name ++ "'"
 
 -- |
 -- Finds idents introduced by declarations.
@@ -113,7 +118,8 @@ renameInModules :: [Module Ann] -> [Module Ann]
 renameInModules = map go
   where
   go :: Module Ann -> Module Ann
-  go m@(Module _ _ _ _ decls) = m { moduleDecls = renameInDecl' (findDeclIdents decls) `map` decls }
+  go m@(Module _ _ _ _ _ decls) = m { moduleDecls = map (renameInDecl' (findDeclIdents decls)) decls }
+
   renameInDecl' :: [Ident] -> Bind Ann -> Bind Ann
   renameInDecl' scope = runRename scope . renameInDecl True
 
@@ -175,7 +181,7 @@ renameInLiteral _ l = return l
 -- Renames within case alternatives.
 --
 renameInCaseAlternative :: CaseAlternative Ann -> Rename (CaseAlternative Ann)
-renameInCaseAlternative (CaseAlternative bs v) =
+renameInCaseAlternative (CaseAlternative bs v) = newScope $
   CaseAlternative <$> mapM renameInBinder bs
                   <*> eitherM (mapM (pairM renameInValue renameInValue)) renameInValue v
 

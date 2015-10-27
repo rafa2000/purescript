@@ -1,4 +1,7 @@
+-- @shouldFailWith ErrorParsingModule
 module TypeWildcards where
+
+import Prelude
 
 data Foo a = Foo
 

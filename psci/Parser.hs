@@ -13,70 +13,131 @@
 --
 -----------------------------------------------------------------------------
 
-module Parser (
-    parseCommand
+{-# LANGUAGE CPP #-}
+
+module Parser
+  ( parseCommand
   ) where
 
 import Prelude hiding (lex)
 
-import Commands
-
 import Data.Char (isSpace)
+import Data.List (intercalate)
 
+#if __GLASGOW_HASKELL__ < 710
 import Control.Applicative hiding (many)
+#endif
 
 import Text.Parsec hiding ((<|>))
 
 import qualified Language.PureScript as P
-import qualified Language.PureScript.Parser.Common as C (mark, same)
+import Language.PureScript.Parser.Common (mark, same)
+
+import qualified Directive as D
+import Types
 
 -- |
 -- Parses PSCI metacommands or expressions input from the user.
 --
 parseCommand :: String -> Either String Command
-parseCommand cmdString = 
-  case splitCommand cmdString of 
-    Just ('?', _) -> return Help
-    Just ('q', _) -> return Quit
-    Just ('r', _) -> return Reset
-    Just ('i', moduleName) -> Import <$> parseRest P.moduleName moduleName
-    Just ('b', moduleName) -> Browse <$> parseRest P.moduleName moduleName
-    Just ('m', filename) -> return $ LoadFile (trimEnd filename)
-    Just ('s', command) -> return $ Show (trimEnd command)
-    Just ('t', expr) -> TypeOf <$> parseRest P.parseValue expr
-    Just ('k', ty) -> KindOf <$> parseRest P.parseType ty
-    Just _ -> Left $ "Unrecognized command. Type :? for help."
-    Nothing -> parseRest (psciLet <|> psciExpression) cmdString
+parseCommand cmdString =
+  case cmdString of
+    (':' : cmd) -> parseDirective cmd
+    _ -> parseRest psciCommand cmdString
+
+parseRest :: P.TokenParser a -> String -> Either String a
+parseRest p s = either (Left . show) Right $ do
+  ts <- P.lex "" s
+  P.runTokenParser "" (p <* eof) ts
+
+psciCommand :: P.TokenParser Command
+psciCommand = choice (map try parsers)
   where
-  parseRest :: P.TokenParser a -> String -> Either String a
-  parseRest p s = either (Left . show) Right $ do
-    ts <- P.lex "" s
-    P.runTokenParser "" (p <* eof) ts
-  
-  trimEnd :: String -> String
-  trimEnd = reverse . dropWhile isSpace . reverse
+  parsers =
+    [ psciLet
+    , psciImport
+    , psciOtherDeclaration
+    , psciExpression
+    ]
 
-  -- |
-  -- Split a command into a command char and the trailing string
-  --
-  splitCommand :: String -> Maybe (Char, String)
-  splitCommand (':' : c : s) = Just (c, dropWhile isSpace s)
-  splitCommand _ = Nothing
+trim :: String -> String
+trim = trimEnd . trimStart
 
-  -- |
-  -- Parses expressions entered at the PSCI repl.
-  --
-  psciExpression :: P.TokenParser Command
-  psciExpression = Expression <$> P.parseValue
-  
-  -- |
-  -- PSCI version of @let@.
-  -- This is essentially let from do-notation.
-  -- However, since we don't support the @Eff@ monad,
-  -- we actually want the normal @let@.
-  --
-  psciLet :: P.TokenParser Command
-  psciLet = Let <$> (P.Let <$> (P.reserved "let" *> P.indented *> manyDecls))
-    where
-    manyDecls :: P.TokenParser [P.Declaration]
-    manyDecls = C.mark (many1 (C.same *> P.parseDeclaration))
+trimStart :: String -> String
+trimStart = dropWhile isSpace
+
+trimEnd :: String -> String
+trimEnd = reverse . trimStart . reverse
+
+parseDirective :: String -> Either String Command
+parseDirective cmd =
+  case D.directivesFor' dstr of
+    [(d, _)] -> commandFor d
+    []       -> Left "Unrecognized directive. Type :? for help."
+    ds       -> Left ("Ambiguous directive. Possible matches: " ++
+                  intercalate ", " (map snd ds) ++ ". Type :? for help.")
+  where
+  (dstr, arg) = break isSpace cmd
+
+  commandFor d = case d of
+    Help    -> return ShowHelp
+    Quit    -> return QuitPSCi
+    Reset   -> return ResetState
+    Browse  -> BrowseModule <$> parseRest P.moduleName arg
+    Load    -> return $ LoadFile (trim arg)
+    Foreign -> return $ LoadForeign (trim arg)
+    Show    -> ShowInfo <$> parseReplQuery' (trim arg)
+    Type    -> TypeOf <$> parseRest P.parseValue arg
+    Kind    -> KindOf <$> parseRest P.parseType arg
+
+-- |
+-- Parses expressions entered at the PSCI repl.
+--
+psciExpression :: P.TokenParser Command
+psciExpression = Expression <$> P.parseValue
+
+-- |
+-- PSCI version of @let@.
+-- This is essentially let from do-notation.
+-- However, since we don't support the @Eff@ monad,
+-- we actually want the normal @let@.
+--
+psciLet :: P.TokenParser Command
+psciLet = Decls <$> (P.reserved "let" *> P.indented *> manyDecls)
+  where
+  manyDecls :: P.TokenParser [P.Declaration]
+  manyDecls = mark (many1 (same *> P.parseLocalDeclaration))
+
+-- | Imports must be handled separately from other declarations, so that
+-- :show import works, for example.
+psciImport :: P.TokenParser Command
+psciImport = Import <$> P.parseImportDeclaration'
+
+-- | Any other declaration that we don't need a 'special case' parser for
+-- (like let or import declarations).
+psciOtherDeclaration :: P.TokenParser Command
+psciOtherDeclaration = Decls . (:[]) <$> do
+  decl <- discardPositionInfo <$> P.parseDeclaration
+  if acceptable decl
+    then return decl
+    else fail "this kind of declaration is not supported in psci"
+
+discardPositionInfo :: P.Declaration -> P.Declaration
+discardPositionInfo (P.PositionedDeclaration _ _ d) = d
+discardPositionInfo d = d
+
+acceptable :: P.Declaration -> Bool
+acceptable P.DataDeclaration{} = True
+acceptable P.TypeSynonymDeclaration{} = True
+acceptable P.ExternDeclaration{} = True
+acceptable P.ExternDataDeclaration{} = True
+acceptable P.TypeClassDeclaration{} = True
+acceptable P.TypeInstanceDeclaration{} = True
+acceptable _ = False
+
+parseReplQuery' :: String -> Either String ReplQuery
+parseReplQuery' str =
+  case parseReplQuery str of
+    Nothing -> Left ("Don't know how to show " ++ str ++ ". Try one of: " ++
+                      intercalate ", " replQueryStrings ++ ".")
+    Just query -> Right query

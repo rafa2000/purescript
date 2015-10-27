@@ -1,5 +1,7 @@
 module Main where
 
-test = ((\x -> x+1) >>> (\x -> x*2)) 4
+import Prelude
 
-main = Debug.Trace.trace "Done"
+test = ((\x -> x+1.0) >>> (\x -> x*2.0)) 4.0
+
+main = Control.Monad.Eff.Console.log "Done"
