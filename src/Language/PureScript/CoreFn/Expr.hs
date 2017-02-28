@@ -1,29 +1,16 @@
------------------------------------------------------------------------------
+-- |
+-- The core functional representation
 --
--- Module      :  Language.PureScript.CoreFn.Expr
--- Copyright   :  (c) 2013-14 Phil Freeman, (c) 2014 Gary Burgess, and other contributors
--- License     :  MIT
---
--- Maintainer  :  Phil Freeman <paf31@cantab.net>, Gary Burgess <gary.burgess@gmail.com>
--- Stability   :  experimental
--- Portability :
---
--- | The core functional representation
---
------------------------------------------------------------------------------
-
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveFunctor #-}
-
 module Language.PureScript.CoreFn.Expr where
+
+import Prelude.Compat
 
 import Control.Arrow ((***))
 
-import qualified Data.Data as D
-
+import Language.PureScript.AST.Literals
 import Language.PureScript.CoreFn.Binders
-import Language.PureScript.CoreFn.Literals
 import Language.PureScript.Names
+import Language.PureScript.PSString (PSString)
 
 -- |
 -- Data type for expressions and terms
@@ -36,15 +23,15 @@ data Expr a
   -- |
   -- A data constructor (type name, constructor name, field names)
   --
-  | Constructor a ProperName ProperName [Ident]
+  | Constructor a (ProperName 'TypeName) (ProperName 'ConstructorName) [Ident]
   -- |
   -- A record property accessor
   --
-  | Accessor a String (Expr a)
+  | Accessor a PSString (Expr a)
   -- |
   -- Partial record update
   --
-  | ObjectUpdate a (Expr a) [(String, Expr a)]
+  | ObjectUpdate a (Expr a) [(PSString, Expr a)]
   -- |
   -- Function introduction
   --
@@ -64,7 +51,8 @@ data Expr a
   -- |
   -- A let binding
   --
-  | Let a [Bind a] (Expr a) deriving (Show, Read, D.Data, D.Typeable, Functor)
+  | Let a [Bind a] (Expr a)
+  deriving (Show, Functor)
 
 -- |
 -- A let or module binding.
@@ -73,11 +61,11 @@ data Bind a
   -- |
   -- Non-recursive binding for a single value
   --
-  = NonRec Ident (Expr a)
+  = NonRec a Ident (Expr a)
   -- |
   -- Mutually recursive binding group for several values
   --
-  | Rec [(Ident, Expr a)] deriving (Show, Read, D.Data, D.Typeable, Functor)
+  | Rec [((a, Ident), Expr a)] deriving (Show, Functor)
 
 -- |
 -- A guard is just a boolean-valued expression that appears alongside a set of binders
@@ -96,7 +84,7 @@ data CaseAlternative a = CaseAlternative
     -- The result expression or a collect of guarded expressions
     --
   , caseAlternativeResult :: Either [(Guard a, Expr a)] (Expr a)
-  } deriving (Show, Read, D.Data, D.Typeable)
+  } deriving (Show)
 
 instance Functor CaseAlternative where
 

@@ -10,11 +10,24 @@ If you would like to contribute, please consider the issues in the current miles
 
 Please follow the following guidelines:
 
-- Add at least a test to `examples/passing/` and possibly to `examples/failing`.
-- Build the binaries and libs with `cabal build`
-- Install the binaries and libs with `cabal install`.
-- Run `cabal configure --enable-tests && cabal build && cabal test` to build the test suite. You will need `npm` and `node` on your PATH to run the tests.
+- Add at least a test to `examples/passing/` and possibly to `examples/failing/`.
+- Build the binaries and libs with `stack build`
+- Make sure that all test suites are passing. Run the test suites with `stack test`.
 - Build the core libraries by running the script in `core-tests`.
+
+## Tests
+
+Run all test suites with `stack test`. You will need `npm`, `bower` and `node` on your PATH to run the tests.
+
+To build and run a specific test in `examples/passing/` or `examples/failing/`, execute the following commands.
+
+``` bash
+# Build
+stack exec psc -- 'tests/support/bower_components/purescript-*/src/**/*.purs' examples/blah/Blah.purs
+
+# Run
+node -e "require('./output/Main/').main()"
+```
 
 ## Code Review
 
@@ -27,12 +40,7 @@ the licenses of all dependencies, including transitive ones, in the LICENSE
 file. Therefore, whenever the dependencies change, the LICENSE file should be
 updated.
 
-You can automate this (if you have bash):
-
-- get a copy of [cabal-dependency-licenses][]
-- run at the command line: `./license/generate > LICENSE`
-
-[cabal-dependency-licenses]: https://github.com/jaspervdj/cabal-dependency-licenses
+This can be automated; see the `license-generator/generate.hs` file.
 
 ## Writing Issues
 

@@ -1,38 +1,23 @@
------------------------------------------------------------------------------
---
--- Module      :  Control.Monad.Logger
--- Author      :  Phil Freeman
--- License     :  MIT (http://opensource.org/licenses/MIT)
---
--- Maintainer  :  Phil Freeman <paf31@cantab.net>
--- Stability   :  experimental
--- Portability :
---
--- | A replacement for WriterT IO which uses mutable references.
---
------------------------------------------------------------------------------
-
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 
+-- |
+-- A replacement for WriterT IO which uses mutable references.
+--
 module Control.Monad.Logger where
+
+import Prelude.Compat
+
+import Control.Monad (ap)
+import Control.Monad.Base (MonadBase(..))
+import Control.Monad.IO.Class
+import Control.Monad.Trans.Control (MonadBaseControl(..))
+import Control.Monad.Writer.Class
 
 import Data.IORef
 
-#if __GLASGOW_HASKELL__ < 710
-import Data.Monoid
-import Control.Applicative
-#endif
-import Control.Monad (ap)
-import Control.Monad.IO.Class
-import Control.Monad.Writer.Class
-import Control.Monad.Base (MonadBase(..))
-import Control.Monad.Trans.Control (MonadBaseControl(..))
-
 -- | A replacement for WriterT IO which uses mutable references.
-data Logger w a = Logger { runLogger :: IORef w -> IO a }
+newtype Logger w a = Logger { runLogger :: IORef w -> IO a }
 
 -- | Run a Logger computation, starting with an empty log.
 runLogger' :: (Monoid w) => Logger w a -> IO (a, w)

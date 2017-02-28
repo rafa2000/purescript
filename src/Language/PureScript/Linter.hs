@@ -1,50 +1,35 @@
------------------------------------------------------------------------------
+-- |
+-- This module implements a simple linting pass on the PureScript AST.
 --
--- Module      :  Language.PureScript.Linter
--- Copyright   :  (c) 2013-15 Phil Freeman, (c) 2014-15 Gary Burgess
--- License     :  MIT (http://opensource.org/licenses/MIT)
---
--- Maintainer  :  Phil Freeman <paf31@cantab.net>
--- Stability   :  experimental
--- Portability :
---
--- | This module implements a simple linting pass on the PureScript AST.
---
------------------------------------------------------------------------------
-
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE CPP #-}
-
 module Language.PureScript.Linter (lint, module L) where
 
-import Data.List (mapAccumL, nub, (\\))
-import Data.Maybe (mapMaybe)
-import Data.Monoid
+import Prelude.Compat
+import Protolude (ordNub)
 
-import qualified Data.Set as S
-
-#if __GLASGOW_HASKELL__ < 710
-import Control.Applicative
-#endif
 import Control.Monad.Writer.Class
 
-import Language.PureScript.Crash
+import Data.List ((\\))
+import Data.Maybe (mapMaybe)
+import Data.Monoid
+import qualified Data.Set as S
+import Data.Text (Text)
+
 import Language.PureScript.AST
-import Language.PureScript.Names
+import Language.PureScript.Crash
 import Language.PureScript.Errors
-import Language.PureScript.Types
 import Language.PureScript.Linter.Exhaustive as L
+import Language.PureScript.Linter.Imports as L
+import Language.PureScript.Names
+import Language.PureScript.Types
 
 -- | Lint the PureScript AST.
 -- |
 -- | Right now, this pass only performs a shadowing check.
-lint :: forall m. (Applicative m, MonadWriter MultipleErrors m) => Module -> m ()
+lint :: forall m. (MonadWriter MultipleErrors m) => Module -> m ()
 lint (Module _ _ mn ds _) = censor (addHint (ErrorInModule mn)) $ mapM_ lintDeclaration ds
   where
   moduleNames :: S.Set Ident
-  moduleNames = S.fromList (nub (mapMaybe getDeclIdent ds))
+  moduleNames = S.fromList (ordNub (mapMaybe getDeclIdent ds))
 
   getDeclIdent :: Declaration -> Maybe Ident
   getDeclIdent (PositionedDeclaration _ _ d) = getDeclIdent d
@@ -55,63 +40,62 @@ lint (Module _ _ mn ds _) = censor (addHint (ErrorInModule mn)) $ mapM_ lintDecl
   getDeclIdent _ = Nothing
 
   lintDeclaration :: Declaration -> m ()
-  lintDeclaration d =
-    let (f, _, _, _, _) = everythingWithContextOnValues moduleNames mempty mappend stepD stepE stepB def def
-
-        f' :: Declaration -> MultipleErrors
-        f' (PositionedDeclaration pos _ dec) = addHint (PositionedError pos) (f' dec)
-        f' dec@(ValueDeclaration name _ _ _) = addHint (ErrorInValueDeclaration name) (f dec <> checkTypeVarsInDecl dec)
-        f' (TypeDeclaration name ty) = addHint (ErrorInTypeDeclaration name) (checkTypeVars ty)
-        f' dec = f dec <> checkTypeVarsInDecl dec
-
-    in tell (f' d)
+  lintDeclaration = tell . f
     where
-    def s _ = (s, mempty)
+    (warningsInDecl, _, _, _, _) = everythingWithScope (\_ _ -> mempty) stepE stepB (\_ _ -> mempty) stepDo
 
-    stepD :: S.Set Ident -> Declaration -> (S.Set Ident, MultipleErrors)
-    stepD s (TypeClassDeclaration name _ _ decls) = (s, foldr go mempty decls)
+    f :: Declaration -> MultipleErrors
+    f (PositionedDeclaration pos _ dec) = addHint (PositionedError pos) (f dec)
+    f (TypeClassDeclaration name args _ _ decs) = addHint (ErrorInTypeClassDeclaration name) (foldMap (f' (S.fromList $ fst <$> args)) decs)
+    f dec = f' S.empty dec
+
+    f' :: S.Set Text -> Declaration -> MultipleErrors
+    f' s (PositionedDeclaration pos _ dec) = addHint (PositionedError pos) (f' s dec)
+    f' s dec@(ValueDeclaration name _ _ _) = addHint (ErrorInValueDeclaration name) (warningsInDecl moduleNames dec <> checkTypeVarsInDecl s dec)
+    f' s (TypeDeclaration name ty) = addHint (ErrorInTypeDeclaration name) (checkTypeVars s ty)
+    f' s dec = warningsInDecl moduleNames dec <> checkTypeVarsInDecl s dec
+
+    stepE :: S.Set Ident -> Expr -> MultipleErrors
+    stepE s (Abs (Left name) _) | name `S.member` s = errorMessage (ShadowedName name)
+    stepE s (Let ds' _) = foldMap go ds'
       where
-      go :: Declaration -> MultipleErrors -> MultipleErrors
-      go (PositionedDeclaration _ _ d') errs = go d' errs
-      go (TypeDeclaration op@(Op _) _) errs = errorMessage (ClassOperator name op) <> errs
-      go _ errs = errs
-    stepD s _ = (s, mempty)
+      go d | Just i <- getDeclIdent d
+           , i `S.member` s = errorMessage (ShadowedName i)
+           | otherwise = mempty
+    stepE _ _ = mempty
 
-    stepE :: S.Set Ident -> Expr -> (S.Set Ident, MultipleErrors)
-    stepE s (Abs (Left name) _) = bindName s name
-    stepE s (Let ds' _) =
-      case mapAccumL bindName s (nub (mapMaybe getDeclIdent ds')) of
-        (s', es) -> (s', mconcat es)
-    stepE s _ = (s, mempty)
+    stepB :: S.Set Ident -> Binder -> MultipleErrors
+    stepB s (VarBinder name) | name `S.member` s = errorMessage (ShadowedName name)
+    stepB s (NamedBinder name _) | name `S.member` s = errorMessage (ShadowedName name)
+    stepB _ _ = mempty
 
-    stepB :: S.Set Ident -> Binder -> (S.Set Ident, MultipleErrors)
-    stepB s (VarBinder name) = bindName s name
-    stepB s (NamedBinder name _) = bindName s name
-    stepB s (TypedBinder _ b) = stepB s b
-    stepB s _ = (s, mempty)
+    stepDo :: S.Set Ident -> DoNotationElement -> MultipleErrors
+    stepDo s (DoNotationLet ds') = foldMap go ds'
+      where
+      go d | Just i <- getDeclIdent d
+           , i `S.member` s = errorMessage (ShadowedName i)
+           | otherwise = mempty
+    stepDo _ _ = mempty
 
-    bindName :: S.Set Ident -> Ident -> (S.Set Ident, MultipleErrors)
-    bindName = bind ShadowedName
+  checkTypeVarsInDecl :: S.Set Text -> Declaration -> MultipleErrors
+  checkTypeVarsInDecl s d = let (f, _, _, _, _) = accumTypes (checkTypeVars s) in f d
 
-  checkTypeVarsInDecl :: Declaration -> MultipleErrors
-  checkTypeVarsInDecl d = let (f, _, _, _, _) = accumTypes checkTypeVars in f d
-
-  checkTypeVars :: Type -> MultipleErrors
-  checkTypeVars ty = everythingWithContextOnTypes S.empty mempty mappend step ty <> findUnused ty
+  checkTypeVars :: S.Set Text -> Type -> MultipleErrors
+  checkTypeVars set ty = everythingWithContextOnTypes set mempty mappend step ty <> findUnused ty
     where
-    step :: S.Set String -> Type -> (S.Set String, MultipleErrors)
+    step :: S.Set Text -> Type -> (S.Set Text, MultipleErrors)
     step s (ForAll tv _ _) = bindVar s tv
     step s _ = (s, mempty)
-    bindVar :: S.Set String -> String -> (S.Set String, MultipleErrors)
+    bindVar :: S.Set Text -> Text -> (S.Set Text, MultipleErrors)
     bindVar = bind ShadowedTypeVar
     findUnused :: Type -> MultipleErrors
     findUnused ty' =
       let used = usedTypeVariables ty'
           declared = everythingOnTypes (++) go ty'
-          unused = nub declared \\ nub used
+          unused = ordNub declared \\ ordNub used
       in foldl (<>) mempty $ map (errorMessage . UnusedTypeVar) unused
       where
-      go :: Type -> [String]
+      go :: Type -> [Text]
       go (ForAll tv _ _) = [tv]
       go _ = []
 

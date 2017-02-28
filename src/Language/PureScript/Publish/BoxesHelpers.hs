@@ -4,7 +4,12 @@ module Language.PureScript.Publish.BoxesHelpers
   , module Language.PureScript.Publish.BoxesHelpers
   ) where
 
+import Prelude.Compat
+
+import Data.Text (Text)
+import qualified Data.Text as T
 import System.IO (hPutStr, stderr)
+
 import qualified Text.PrettyPrint.Boxes as Boxes
 
 width :: Int
@@ -34,5 +39,11 @@ spacer = Boxes.emptyBox 1 1
 bulletedList :: (a -> String) -> [a] -> [Boxes.Box]
 bulletedList f = map (indented . para . ("* " ++) . f)
 
+bulletedListT :: (a -> Text) -> [a] -> [Boxes.Box]
+bulletedListT f = bulletedList (T.unpack . f)
+
 printToStderr :: Boxes.Box -> IO ()
 printToStderr = hPutStr stderr . Boxes.render
+
+printToStdout :: Boxes.Box -> IO ()
+printToStdout = putStr . Boxes.render

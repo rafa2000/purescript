@@ -1,32 +1,15 @@
------------------------------------------------------------------------------
+-- |
+-- Source position information
 --
--- Module      :  Language.PureScript.AST.SourcePos
--- Copyright   :  (c) 2013-15 Phil Freeman, (c) 2014-15 Gary Burgess
--- License     :  MIT (http://opensource.org/licenses/MIT)
---
--- Maintainer  :  Phil Freeman <paf31@cantab.net>
--- Stability   :  experimental
--- Portability :
---
--- | Source position information
---
------------------------------------------------------------------------------
-
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE OverloadedStrings #-}
-
 module Language.PureScript.AST.SourcePos where
 
-import qualified Data.Data as D
+import Prelude.Compat
+
 import Data.Aeson ((.=), (.:))
 import qualified Data.Aeson as A
-
-#if __GLASGOW_HASKELL__ < 710
-import Control.Applicative
-#endif
+import Data.Monoid
+import qualified Data.Text as T
+import Data.Text (Text)
 
 -- |
 -- Source position information
@@ -40,12 +23,12 @@ data SourcePos = SourcePos
     -- Column number
     --
   , sourcePosColumn :: Int
-  } deriving (Show, Read, Eq, Ord, D.Data, D.Typeable)
+  } deriving (Show, Eq, Ord)
 
-displaySourcePos :: SourcePos -> String
+displaySourcePos :: SourcePos -> Text
 displaySourcePos sp =
-  "line " ++ show (sourcePosLine sp) ++
-    ", column " ++ show (sourcePosColumn sp)
+  "line " <> T.pack (show (sourcePosLine sp)) <>
+    ", column " <> T.pack (show (sourcePosColumn sp))
 
 instance A.ToJSON SourcePos where
   toJSON SourcePos{..} =
@@ -68,16 +51,16 @@ data SourceSpan = SourceSpan
     -- End of the span
     --
   , spanEnd :: SourcePos
-  } deriving (Show, Read, Eq, Ord, D.Data, D.Typeable)
+  } deriving (Show, Eq, Ord)
 
-displayStartEndPos :: SourceSpan -> String
+displayStartEndPos :: SourceSpan -> Text
 displayStartEndPos sp =
-  displaySourcePos (spanStart sp) ++ " - " ++
+  displaySourcePos (spanStart sp) <> " - " <>
   displaySourcePos (spanEnd sp)
 
-displaySourceSpan :: SourceSpan -> String
+displaySourceSpan :: SourceSpan -> Text
 displaySourceSpan sp =
-  spanName sp ++ " " ++
+  T.pack (spanName sp) <> " " <>
     displayStartEndPos sp
 
 instance A.ToJSON SourceSpan where

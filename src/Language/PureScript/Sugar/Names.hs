@@ -1,107 +1,123 @@
------------------------------------------------------------------------------
---
--- Module      :  Language.PureScript.Sugar.Names
--- License     :  MIT (http://opensource.org/licenses/MIT)
---
--- Maintainer  :  Phil Freeman <paf31@cantab.net>, Gary Burgess <gary.burgess@gmail.com>
--- Stability   :  experimental
--- Portability :
---
--- |
---
------------------------------------------------------------------------------
+module Language.PureScript.Sugar.Names
+  ( desugarImports
+  , desugarImportsWithEnv
+  , Env
+  , ImportRecord(..)
+  , ImportProvenance(..)
+  , Imports(..)
+  , Exports(..)
+  ) where
 
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+import Prelude.Compat
+import Protolude (ordNub)
 
-module Language.PureScript.Sugar.Names (desugarImports) where
-
-import Data.List (find, nub)
-import Data.Maybe (fromMaybe, mapMaybe)
-
-#if __GLASGOW_HASKELL__ < 710
-import Control.Applicative (Applicative(..), (<$>), (<*>))
-#endif
+import Control.Arrow (first)
 import Control.Monad
 import Control.Monad.Error.Class (MonadError(..))
-import Control.Monad.Writer (MonadWriter(..))
+import Control.Monad.State.Lazy
+import Control.Monad.Writer (MonadWriter(..), censor)
 
+import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Map as M
+import qualified Data.Set as S
 
-import Language.PureScript.Crash
 import Language.PureScript.AST
-import Language.PureScript.Names
-import Language.PureScript.Types
+import Language.PureScript.Crash
 import Language.PureScript.Errors
-import Language.PureScript.Traversals
 import Language.PureScript.Externs
+import Language.PureScript.Kinds
+import Language.PureScript.Linter.Imports
+import Language.PureScript.Names
 import Language.PureScript.Sugar.Names.Env
-import Language.PureScript.Sugar.Names.Imports
 import Language.PureScript.Sugar.Names.Exports
+import Language.PureScript.Sugar.Names.Imports
+import Language.PureScript.Traversals
+import Language.PureScript.Types
 
 -- |
 -- Replaces all local names with qualified names within a list of modules. The
 -- modules should be topologically sorted beforehand.
 --
-desugarImports :: forall m. (Applicative m, MonadError MultipleErrors m, MonadWriter MultipleErrors m) => [ExternsFile] -> [Module] -> m [Module]
-desugarImports externs modules = do
-  env <- foldM externsEnv primEnv externs
-  env' <- foldM updateEnv env modules
-  mapM (renameInModule' env') modules
+desugarImports
+  :: forall m
+   . (MonadError MultipleErrors m, MonadWriter MultipleErrors m)
+  => [ExternsFile]
+  -> [Module]
+  -> m [Module]
+desugarImports externs modules =
+  fmap snd (desugarImportsWithEnv externs modules)
+
+desugarImportsWithEnv
+  :: forall m
+  . (MonadError MultipleErrors m, MonadWriter MultipleErrors m)
+  => [ExternsFile]
+  -> [Module]
+  -> m (Env, [Module])
+desugarImportsWithEnv externs modules = do
+  env <- silence $ foldM externsEnv primEnv externs
+  (modules', env') <- first reverse <$> foldM updateEnv ([], env) modules
+  (env',) <$> traverse (renameInModule' env') modules'
   where
+  silence :: m a -> m a
+  silence = censor (const mempty)
+
   -- | Create an environment from a collection of externs files
   externsEnv :: Env -> ExternsFile -> m Env
   externsEnv env ExternsFile{..} = do
     let members = Exports{..}
         ss = internalModuleSourceSpan "<Externs>"
-        env' = M.insert efModuleName (ss, nullImports, members) env
-        fromEFImport (ExternsImport mn mt qmn) = (mn, [(Nothing, mt, qmn)])
-    imps <- foldM (resolveModuleImport efModuleName env') nullImports (map fromEFImport efImports)
-    exps <- resolveExports env' efModuleName imps members efExports
+        env' = M.insert efModuleName (ss, primImports, members) env
+        fromEFImport (ExternsImport mn mt qmn) = (mn, [(Nothing, Just mt, qmn)])
+    imps <- foldM (resolveModuleImport env') primImports (map fromEFImport efImports)
+    exps <- resolveExports env' ss efModuleName imps members efExports
     return $ M.insert efModuleName (ss, imps, exps) env
     where
 
-    exportedTypes :: [((ProperName, [ProperName]), ModuleName)]
-    exportedTypes = mapMaybe toExportedType efExports
+    exportedTypes :: M.Map (ProperName 'TypeName) ([ProperName 'ConstructorName], ModuleName)
+    exportedTypes = M.fromList $ mapMaybe toExportedType efExports
       where
-      toExportedType (TypeRef tyCon dctors) = Just ((tyCon, fromMaybe (mapMaybe forTyCon efDeclarations) dctors), efModuleName)
+      toExportedType (TypeRef tyCon dctors) = Just (tyCon, (fromMaybe (mapMaybe forTyCon efDeclarations) dctors, efModuleName))
         where
-        forTyCon :: ExternsDeclaration -> Maybe ProperName
+        forTyCon :: ExternsDeclaration -> Maybe (ProperName 'ConstructorName)
         forTyCon (EDDataConstructor pn _ tNm _ _) | tNm == tyCon = Just pn
         forTyCon _ = Nothing
       toExportedType (PositionedDeclarationRef _ _ r) = toExportedType r
       toExportedType _ = Nothing
-    exportedTypeClasses :: [(ProperName, ModuleName)]
-    exportedTypeClasses = mapMaybe toExportedTypeClass efExports
-      where
-      toExportedTypeClass (TypeClassRef className) = Just (className, efModuleName)
-      toExportedTypeClass (PositionedDeclarationRef _ _ r) = toExportedTypeClass r
-      toExportedTypeClass _ = Nothing
-    exportedValues :: [(Ident, ModuleName)]
-    exportedValues = mapMaybe toExportedValue efExports
-      where
-      toExportedValue (ValueRef ident) = Just (ident, efModuleName)
-      toExportedValue (PositionedDeclarationRef _ _ r) = toExportedValue r
-      toExportedValue _ = Nothing
 
-  updateEnv :: Env -> Module -> m Env
-  updateEnv env m@(Module ss _ mn _ refs) =
-    case mn `M.lookup` env of
-      Just m' -> throwError . errorMessage $ RedefinedModule mn [envModuleSourceSpan m', ss]
-      Nothing -> do
-        members <- findExportable m
-        let env' = M.insert mn (ss, nullImports, members) env
-        imps <- resolveImports env' m
-        exps <- maybe (return members) (resolveExports env' mn imps members) refs
-        return $ M.insert mn (ss, imps, exps) env
+    exportedTypeOps :: M.Map (OpName 'TypeOpName) ModuleName
+    exportedTypeOps = exportedRefs getTypeOpRef
+
+    exportedTypeClasses :: M.Map (ProperName 'ClassName) ModuleName
+    exportedTypeClasses = exportedRefs getTypeClassRef
+
+    exportedValues :: M.Map Ident ModuleName
+    exportedValues = exportedRefs getValueRef
+
+    exportedValueOps :: M.Map (OpName 'ValueOpName) ModuleName
+    exportedValueOps = exportedRefs getValueOpRef
+
+    exportedRefs :: Ord a => (DeclarationRef -> Maybe a) -> M.Map a ModuleName
+    exportedRefs f = M.fromList $ (, efModuleName) <$> mapMaybe f efExports
+
+    exportedKinds :: M.Map (ProperName 'KindName) ModuleName
+    exportedKinds = exportedRefs getKindRef
+
+  updateEnv :: ([Module], Env) -> Module -> m ([Module], Env)
+  updateEnv (ms, env) m@(Module ss _ mn _ refs) = do
+    members <- findExportable m
+    let env' = M.insert mn (ss, primImports, members) env
+    (m', imps) <- resolveImports env' m
+    exps <- maybe (return members) (resolveExports env' ss mn imps members) refs
+    return (m' : ms, M.insert mn (ss, imps, exps) env)
 
   renameInModule' :: Env -> Module -> m Module
   renameInModule' env m@(Module _ _ mn _ _) =
-    rethrow (addHint (ErrorInModule mn)) $ do
+    warnAndRethrow (addHint (ErrorInModule mn)) $ do
       let (_, imps, exps) = fromMaybe (internalError "Module is missing in renameInModule'") $ M.lookup mn env
-      elaborateImports imps <$> renameInModule env imps (elaborateExports exps m)
+      (m', used) <- flip runStateT M.empty $ renameInModule imps m
+      let m'' = elaborateExports exps m'
+      lintImports m'' env used
+      return m''
 
 -- |
 -- Make all exports for a module explicit. This may still effect modules that
@@ -110,69 +126,87 @@ desugarImports externs modules = do
 --
 elaborateExports :: Exports -> Module -> Module
 elaborateExports exps (Module ss coms mn decls refs) =
-  Module ss coms mn decls $
-    Just $ map (\(ctor, dctors) -> TypeRef ctor (Just dctors)) (my exportedTypes) ++
-           map TypeClassRef (my exportedTypeClasses) ++
-           map ValueRef (my exportedValues) ++
-           maybe [] (filter isModuleRef) refs
+  Module ss coms mn decls $ Just
+    $ elaboratedTypeRefs
+    ++ go TypeOpRef exportedTypeOps
+    ++ go TypeClassRef exportedTypeClasses
+    ++ go ValueRef exportedValues
+    ++ go ValueOpRef exportedValueOps
+    ++ go KindRef exportedKinds
+    ++ maybe [] (filter isModuleRef) refs
   where
-  -- Extracts a list of values from the exports and filters out any values that
-  -- are re-exports from other modules.
-  my :: (Exports -> [(a, ModuleName)]) -> [a]
-  my f = fst `map` filter ((== mn) . snd) (f exps)
 
--- |
--- Add `import X ()` for any modules where there are only fully qualified references to members.
--- This ensures transitive instances are included when using a member from a module.
---
-elaborateImports :: Imports -> Module -> Module
-elaborateImports imps (Module ss coms mn decls exps) = Module ss coms mn decls' exps
-  where
-  decls' :: [Declaration]
-  decls' =
-    let (f, _, _, _, _) = everythingOnValues (++) (const []) fqValues (const []) (const []) (const [])
-    in mkImport `map` nub (f `concatMap` decls) ++ decls
-  fqValues :: Expr -> [ModuleName]
-  fqValues (Var (Qualified (Just mn') _)) | mn' `notElem` importedModules imps = [mn']
-  fqValues _ = []
-  mkImport :: ModuleName -> Declaration
-  mkImport mn' = ImportDeclaration mn' (Explicit []) Nothing
+  elaboratedTypeRefs :: [DeclarationRef]
+  elaboratedTypeRefs =
+    flip map (M.toList (exportedTypes exps)) $ \(tctor, (dctors, mn')) ->
+      let ref = TypeRef tctor (Just dctors)
+      in if mn == mn' then ref else ReExportRef mn' ref
+
+  go :: (a -> DeclarationRef) -> (Exports -> M.Map a ModuleName) -> [DeclarationRef]
+  go toRef select =
+    flip map (M.toList (select exps)) $ \(export, mn') ->
+      if mn == mn' then toRef export else ReExportRef mn' (toRef export)
 
 -- |
 -- Replaces all local names with qualified names within a module and checks that all existing
 -- qualified names are valid.
 --
-renameInModule :: forall m. (Applicative m, MonadError MultipleErrors m) => Env -> Imports -> Module -> m Module
-renameInModule env imports (Module ss coms mn decls exps) =
+renameInModule
+  :: forall m
+   . (MonadError MultipleErrors m, MonadWriter MultipleErrors m, MonadState UsedImports m)
+  => Imports
+  -> Module
+  -> m Module
+renameInModule imports (Module ss coms mn decls exps) =
   Module ss coms mn <$> parU decls go <*> pure exps
   where
+
   (go, _, _, _, _) = everywhereWithContextOnValuesM (Nothing, []) updateDecl updateValue updateBinder updateCase defS
 
-  updateDecl :: (Maybe SourceSpan, [Ident]) -> Declaration -> m ((Maybe SourceSpan, [Ident]), Declaration)
+  updateDecl
+    :: (Maybe SourceSpan, [Ident])
+    -> Declaration
+    -> m ((Maybe SourceSpan, [Ident]), Declaration)
   updateDecl (_, bound) d@(PositionedDeclaration pos _ _) =
     return ((Just pos, bound), d)
   updateDecl (pos, bound) (DataDeclaration dtype name args dctors) =
-    (,) (pos, bound) <$> (DataDeclaration dtype name args <$> mapM (sndM (mapM (updateTypesEverywhere pos))) dctors)
+    (,) (pos, bound) <$> (DataDeclaration dtype name <$> updateTypeArguments pos args
+                                                     <*> traverse (sndM (traverse (updateTypesEverywhere pos))) dctors)
   updateDecl (pos, bound) (TypeSynonymDeclaration name ps ty) =
-    (,) (pos, bound) <$> (TypeSynonymDeclaration name ps <$> updateTypesEverywhere pos ty)
-  updateDecl (pos, bound) (TypeClassDeclaration className args implies ds) =
-    (,) (pos, bound) <$> (TypeClassDeclaration className args <$> updateConstraints pos implies <*> pure ds)
+    (,) (pos, bound) <$> (TypeSynonymDeclaration name <$> updateTypeArguments pos ps
+                                                      <*> updateTypesEverywhere pos ty)
+  updateDecl (pos, bound) (TypeClassDeclaration className args implies deps ds) =
+    (,) (pos, bound) <$> (TypeClassDeclaration className <$> updateTypeArguments pos args
+                                                         <*> updateConstraints pos implies
+                                                         <*> pure deps
+                                                         <*> pure ds)
   updateDecl (pos, bound) (TypeInstanceDeclaration name cs cn ts ds) =
-    (,) (pos, bound) <$> (TypeInstanceDeclaration name <$> updateConstraints pos cs <*> updateClassName cn pos <*> mapM (updateTypesEverywhere pos) ts <*> pure ds)
+    (,) (pos, bound) <$> (TypeInstanceDeclaration name <$> updateConstraints pos cs <*> updateClassName cn pos <*> traverse (updateTypesEverywhere pos) ts <*> pure ds)
   updateDecl (pos, bound) (TypeDeclaration name ty) =
     (,) (pos, bound) <$> (TypeDeclaration name <$> updateTypesEverywhere pos ty)
   updateDecl (pos, bound) (ExternDeclaration name ty) =
     (,) (pos, name : bound) <$> (ExternDeclaration name <$> updateTypesEverywhere pos ty)
+  updateDecl (pos, bound) (ExternDataDeclaration name ki) =
+    (,) (pos, bound) <$> (ExternDataDeclaration name <$> updateKindsEverywhere pos ki)
+  updateDecl (pos, bound) (TypeFixityDeclaration fixity alias op) =
+    (,) (pos, bound) <$> (TypeFixityDeclaration fixity <$> updateTypeName alias pos <*> pure op)
+  updateDecl (pos, bound) (ValueFixityDeclaration fixity (Qualified mn' (Left alias)) op) =
+    (,) (pos, bound) <$> (ValueFixityDeclaration fixity . fmap Left <$> updateValueName (Qualified mn' alias) pos <*> pure op)
+  updateDecl (pos, bound) (ValueFixityDeclaration fixity (Qualified mn' (Right alias)) op) =
+    (,) (pos, bound) <$> (ValueFixityDeclaration fixity . fmap Right <$> updateDataConstructorName (Qualified mn' alias) pos  <*> pure op)
   updateDecl s d = return (s, d)
 
-  updateValue :: (Maybe SourceSpan, [Ident]) -> Expr -> m ((Maybe SourceSpan, [Ident]), Expr)
+  updateValue
+    :: (Maybe SourceSpan, [Ident])
+    -> Expr
+    -> m ((Maybe SourceSpan, [Ident]), Expr)
   updateValue (_, bound) v@(PositionedValue pos' _ _) =
     return ((Just pos', bound), v)
   updateValue (pos, bound) (Abs (Left arg) val') =
     return ((pos, arg : bound), Abs (Left arg) val')
   updateValue (pos, bound) (Let ds val') = do
     let args = mapMaybe letBoundVariable ds
-    unless (length (nub args) == length args) $
+    unless (length (ordNub args) == length args) $
       maybe id rethrowWithPosition pos $
         throwError . errorMessage $ OverlappingNamesInLet
     return ((pos, args ++ bound), Let ds val')
@@ -180,105 +214,159 @@ renameInModule env imports (Module ss coms mn decls exps) =
     (,) (pos, bound) <$> (Var <$> updateValueName name' pos)
   updateValue (pos, bound) (Var name'@(Qualified (Just _) _)) =
     (,) (pos, bound) <$> (Var <$> updateValueName name' pos)
+  updateValue (pos, bound) (Op op) =
+    (,) (pos, bound) <$> (Op <$> updateValueOpName op pos)
   updateValue s@(pos, _) (Constructor name) =
     (,) s <$> (Constructor <$> updateDataConstructorName name pos)
   updateValue s@(pos, _) (TypedValue check val ty) =
     (,) s <$> (TypedValue check val <$> updateTypesEverywhere pos ty)
   updateValue s v = return (s, v)
 
-  updateBinder :: (Maybe SourceSpan, [Ident]) -> Binder -> m ((Maybe SourceSpan, [Ident]), Binder)
+  updateBinder
+    :: (Maybe SourceSpan, [Ident])
+    -> Binder
+    -> m ((Maybe SourceSpan, [Ident]), Binder)
   updateBinder (_, bound) v@(PositionedBinder pos _ _) =
     return ((Just pos, bound), v)
   updateBinder s@(pos, _) (ConstructorBinder name b) =
     (,) s <$> (ConstructorBinder <$> updateDataConstructorName name pos <*> pure b)
-  updateBinder s (TypedBinder t b) = do
-    (s'@ (span', _), b') <- updateBinder s b
-    t' <- updateTypesEverywhere span' t
-    return (s', TypedBinder t' b')
+  updateBinder s@(pos, _) (OpBinder op) =
+    (,) s <$> (OpBinder <$> updateValueOpName op pos)
+  updateBinder s@(pos, _) (TypedBinder t b) = do
+    t' <- updateTypesEverywhere pos t
+    return (s, TypedBinder t' b)
   updateBinder s v =
     return (s, v)
 
-  updateCase :: (Maybe SourceSpan, [Ident]) -> CaseAlternative -> m ((Maybe SourceSpan, [Ident]), CaseAlternative)
-  updateCase (pos, bound) c@(CaseAlternative bs _) =
-    return ((pos, concatMap binderNames bs ++ bound), c)
+  updateCase
+    :: (Maybe SourceSpan, [Ident])
+    -> CaseAlternative
+    -> m ((Maybe SourceSpan, [Ident]), CaseAlternative)
+  updateCase (pos, bound) c@(CaseAlternative bs gs) =
+    return ((pos, concatMap binderNames bs ++ updateGuard gs ++ bound), c)
+    where
+    updateGuard :: [GuardedExpr] -> [Ident]
+    updateGuard [] = []
+    updateGuard (GuardedExpr g _ : xs) =
+      concatMap updatePatGuard g ++ updateGuard xs
+      where
+        updatePatGuard (PatternGuard b _) = binderNames b
+        updatePatGuard _                  = []
 
   letBoundVariable :: Declaration -> Maybe Ident
   letBoundVariable (ValueDeclaration ident _ _ _) = Just ident
   letBoundVariable (PositionedDeclaration _ _ d) = letBoundVariable d
   letBoundVariable _ = Nothing
 
+  updateKindsEverywhere :: Maybe SourceSpan -> Kind -> m Kind
+  updateKindsEverywhere pos = everywhereOnKindsM updateKind
+    where
+    updateKind :: Kind -> m Kind
+    updateKind (NamedKind name) = NamedKind <$> updateKindName name pos
+    updateKind k = return k
+
+  updateTypeArguments
+    :: (Traversable f, Traversable g)
+    => Maybe SourceSpan
+    -> f (a, g Kind) -> m (f (a, g Kind))
+  updateTypeArguments pos = traverse (sndM (traverse (updateKindsEverywhere pos)))
+
   updateTypesEverywhere :: Maybe SourceSpan -> Type -> m Type
   updateTypesEverywhere pos = everywhereOnTypesM updateType
     where
     updateType :: Type -> m Type
+    updateType (TypeOp name) = TypeOp <$> updateTypeOpName name pos
     updateType (TypeConstructor name) = TypeConstructor <$> updateTypeName name pos
-    updateType (ConstrainedType cs t) = ConstrainedType <$> updateConstraints pos cs <*> pure t
+    updateType (ConstrainedType cs t) = ConstrainedType <$> traverse updateInConstraint cs <*> pure t
+    updateType (KindedType t k) = KindedType t <$> updateKindsEverywhere pos k
     updateType t = return t
+    updateInConstraint :: Constraint -> m Constraint
+    updateInConstraint (Constraint name ts info) =
+      Constraint <$> updateClassName name pos <*> pure ts <*> pure info
 
   updateConstraints :: Maybe SourceSpan -> [Constraint] -> m [Constraint]
-  updateConstraints pos = mapM (\(name, ts) -> (,) <$> updateClassName name pos <*> mapM (updateTypesEverywhere pos) ts)
+  updateConstraints pos = traverse $ \(Constraint name ts info) ->
+    Constraint
+      <$> updateClassName name pos
+      <*> traverse (updateTypesEverywhere pos) ts
+      <*> pure info
 
-  updateTypeName :: Qualified ProperName -> Maybe SourceSpan -> m (Qualified ProperName)
-  updateTypeName = update UnknownType (importedTypes imports) (resolveType . exportedTypes)
+  updateTypeName
+    :: Qualified (ProperName 'TypeName)
+    -> Maybe SourceSpan
+    -> m (Qualified (ProperName 'TypeName))
+  updateTypeName = update (importedTypes imports) TyName
 
-  updateDataConstructorName :: Qualified ProperName -> Maybe SourceSpan -> m (Qualified ProperName)
-  updateDataConstructorName = update (flip UnknownDataConstructor Nothing) (importedDataConstructors imports) (resolveDctor . exportedTypes)
+  updateTypeOpName
+    :: Qualified (OpName 'TypeOpName)
+    -> Maybe SourceSpan
+    -> m (Qualified (OpName 'TypeOpName))
+  updateTypeOpName = update (importedTypeOps imports) TyOpName
 
-  updateClassName  :: Qualified ProperName -> Maybe SourceSpan -> m (Qualified ProperName)
-  updateClassName = update UnknownTypeClass (importedTypeClasses imports) (resolve . exportedTypeClasses)
+  updateDataConstructorName
+    :: Qualified (ProperName 'ConstructorName)
+    -> Maybe SourceSpan
+    -> m (Qualified (ProperName 'ConstructorName))
+  updateDataConstructorName = update (importedDataConstructors imports) DctorName
 
-  updateValueName  :: Qualified Ident -> Maybe SourceSpan -> m (Qualified Ident)
-  updateValueName = update UnknownValue (importedValues imports) (resolve . exportedValues)
+  updateClassName
+    :: Qualified (ProperName 'ClassName)
+    -> Maybe SourceSpan
+    -> m (Qualified (ProperName 'ClassName))
+  updateClassName = update (importedTypeClasses imports) TyClassName
 
-  -- Used when performing an update to qualify values and classes with their
-  -- module of original definition.
-  resolve :: (Eq a) => [(a, ModuleName)] -> a -> Maybe (Qualified a)
-  resolve as name = mkQualified name <$> name `lookup` as
+  updateValueName :: Qualified Ident -> Maybe SourceSpan -> m (Qualified Ident)
+  updateValueName = update (importedValues imports) IdentName
 
-  -- Used when performing an update to qualify types with their module of
-  -- original definition.
-  resolveType :: [((ProperName, [ProperName]), ModuleName)] -> ProperName -> Maybe (Qualified ProperName)
-  resolveType tys name = mkQualified name . snd <$> find ((== name) . fst . fst) tys
+  updateValueOpName
+    :: Qualified (OpName 'ValueOpName)
+    -> Maybe SourceSpan
+    -> m (Qualified (OpName 'ValueOpName))
+  updateValueOpName = update (importedValueOps imports) ValOpName
 
-  -- Used when performing an update to qualify data constructors with their
-  -- module of original definition.
-  resolveDctor :: [((ProperName, [ProperName]), ModuleName)] -> ProperName -> Maybe (Qualified ProperName)
-  resolveDctor tys name = mkQualified name . snd <$> find (elem name . snd . fst) tys
+  updateKindName
+    :: Qualified (ProperName 'KindName)
+    -> Maybe SourceSpan
+    -> m (Qualified (ProperName 'KindName))
+  updateKindName = update (importedKinds imports) KiName
 
   -- Update names so unqualified references become qualified, and locally
   -- qualified references are replaced with their canoncial qualified names
   -- (e.g. M.Map -> Data.Map.Map).
-  update :: (Ord a) => (Qualified a -> SimpleErrorMessage)
-                       -> M.Map (Qualified a) (Qualified a, ModuleName)
-                       -> (Exports -> a -> Maybe (Qualified a))
-                       -> Qualified a
-                       -> Maybe SourceSpan
-                       -> m (Qualified a)
-  update unknown imps getE qname@(Qualified mn' name) pos = positioned $
+  update
+    :: (Ord a)
+    => M.Map (Qualified a) [ImportRecord a]
+    -> (a -> Name)
+    -> Qualified a
+    -> Maybe SourceSpan
+    -> m (Qualified a)
+  update imps toName qname@(Qualified mn' name) pos = positioned $
     case (M.lookup qname imps, mn') of
+
       -- We found the name in our imports, so we return the name for it,
       -- qualifying with the name of the module it was originally defined in
       -- rather than the module we're importing from, to handle the case of
-      -- re-exports.
-      (Just (_, mnOrig), _) -> return $ Qualified (Just mnOrig) name
+      -- re-exports. If there are multiple options for the name to resolve to
+      -- in scope, we throw an error.
+      (Just options, _) -> do
+        (mnNew, mnOrig) <- checkImportConflicts mn toName options
+        modify $ \usedImports ->
+          M.insertWith (++) mnNew [fmap toName qname] usedImports
+        return $ Qualified (Just mnOrig) name
+
       -- If the name wasn't found in our imports but was qualified then we need
       -- to check whether it's a failed import from a "pseudo" module (created
       -- by qualified importing). If that's not the case, then we just need to
       -- check it refers to a symbol in another module.
-      (Nothing, Just mn'') -> do
-        when (isExplicitQualModule mn'') . throwError . errorMessage $ unknown qname
-        modExports <- getExports mn''
-        maybe (throwError . errorMessage $ unknown qname) return (getE modExports name)
+      (Nothing, Just mn'') ->
+        if mn'' `S.member` importedQualModules imports || mn'' `S.member` importedModules imports
+        then throwUnknown
+        else throwError . errorMessage . UnknownName . Qualified Nothing $ ModName mn''
+
       -- If neither of the above cases are true then it's an undefined or
       -- unimported symbol.
-      _ -> throwError . errorMessage $ unknown qname
-    where
-    isExplicitQualModule :: ModuleName -> Bool
-    isExplicitQualModule = flip elem $ mapMaybe (\(Qualified q _) -> q) (M.keys imps)
-    positioned err = case pos of
-      Nothing -> err
-      Just pos' -> rethrowWithPosition pos' err
+      _ -> throwUnknown
 
-  -- Gets the exports for a module, or an error message if the module doesn't exist
-  getExports :: ModuleName -> m Exports
-  getExports mn' = maybe (throwError . errorMessage $ UnknownModule mn') (return . envModuleExports) $ M.lookup mn' env
+    where
+    positioned err = maybe err (`warnAndRethrowWithPosition` err) pos
+    throwUnknown = throwError . errorMessage . UnknownName . fmap toName $ qname

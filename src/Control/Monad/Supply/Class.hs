@@ -1,36 +1,36 @@
------------------------------------------------------------------------------
---
--- Module      :  Control.Monad.Supply.Class
--- Copyright   :  (c) PureScript 2015
--- License     :  MIT
---
--- Maintainer  :  Phil Freeman <paf31@cantab.net>
--- Stability   :  experimental
--- Portability :
---
 -- |
 -- A class for monads supporting a supply of fresh names
 --
------------------------------------------------------------------------------
 
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Control.Monad.Supply.Class where
 
+import Prelude.Compat
+
 import Control.Monad.Supply
 import Control.Monad.State
+import Control.Monad.Writer
+import Data.Text (Text, pack)
 
-class (Monad m) => MonadSupply m where
+class Monad m => MonadSupply m where
   fresh :: m Integer
-  
-instance (Monad m) => MonadSupply (SupplyT m) where
+  peek :: m Integer
+  default fresh :: (MonadTrans t, MonadSupply n, m ~ t n) => m Integer
+  fresh = lift fresh
+  default peek :: (MonadTrans t, MonadSupply n, m ~ t n) => m Integer
+  peek = lift peek
+
+instance Monad m => MonadSupply (SupplyT m) where
   fresh = SupplyT $ do
     n <- get
     put (n + 1)
     return n
-  
-instance (MonadSupply m) => MonadSupply (StateT s m) where
-  fresh = lift fresh
+  peek = SupplyT get
 
-freshName :: (MonadSupply m) => m String
-freshName = liftM (('_' :) . show) fresh
+instance MonadSupply m => MonadSupply (StateT s m)
+instance (Monoid w, MonadSupply m) => MonadSupply (WriterT w m)
+
+freshName :: MonadSupply m => m Text
+freshName = fmap (("$" <> ) . pack . show) fresh

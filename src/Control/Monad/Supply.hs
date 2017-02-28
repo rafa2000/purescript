@@ -1,35 +1,22 @@
------------------------------------------------------------------------------
---
--- Module      :  Control.Monad.Supply
--- Copyright   :  (c) Phil Freeman 2014
--- License     :  MIT
---
--- Maintainer  :  Phil Freeman <paf31@cantab.net>
--- Stability   :  experimental
--- Portability :
---
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 -- |
 -- Fresh variable supply
 --
------------------------------------------------------------------------------
-
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE CPP #-}
-
 module Control.Monad.Supply where
+
+import Prelude.Compat
+
+import Control.Applicative
+import Control.Monad.Error.Class (MonadError(..))
+import Control.Monad.Reader
+import Control.Monad.State
+import Control.Monad.Writer
 
 import Data.Functor.Identity
 
-#if __GLASGOW_HASKELL__ < 710
-import Control.Applicative
-#endif
-import Control.Monad.State
-import Control.Monad.Error.Class (MonadError(..))
-import Control.Monad.Reader
-import Control.Monad.Writer
-
-newtype SupplyT m a = SupplyT { unSupplyT :: StateT Integer m a } 
-  deriving (Functor, Applicative, Monad, MonadTrans, MonadError e, MonadWriter w, MonadReader r)
+newtype SupplyT m a = SupplyT { unSupplyT :: StateT Integer m a }
+  deriving (Functor, Applicative, Monad, MonadTrans, MonadError e, MonadWriter w, MonadReader r, Alternative, MonadPlus)
 
 runSupplyT :: Integer -> SupplyT m a -> m (a, Integer)
 runSupplyT n = flip runStateT n . unSupplyT

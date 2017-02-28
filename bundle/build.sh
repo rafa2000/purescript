@@ -1,6 +1,7 @@
+## This script can be run on any supported OS to create a binary .tar.gz
+## bundle.
+## For Windows, msysgit contains all of the pieces needed to run this script.
 set -e
-
-SCRIPTPATH=$( cd "$(dirname "$0")" ; pwd -P )
 
 OS=$1
 
@@ -10,35 +11,52 @@ then
   exit 1
 fi
 
-pushd ${SCRIPTPATH} > /dev/null
+pushd $(stack path --project-root)
+
+LOCAL_INSTALL_ROOT=$(stack path --local-install-root)
+
+if [ "$OS" = "win64" ]
+then
+  BIN_EXT=".exe"
+else
+  BIN_EXT=""
+fi
 
 # Make the staging directory
-mkdir -p build/purescript/
+mkdir -p bundle/build/purescript
 
-# Strip the binaries
-strip ../dist/build/psc/psc
-strip ../dist/build/psci/psci
-strip ../dist/build/psc-docs/psc-docs
-strip ../dist/build/psc-publish/psc-publish
-strip ../dist/build/psc-bundle/psc-bundle
+# Strip the binaries, and copy them to the staging directory
+BIN=purs
+FULL_BIN="$LOCAL_INSTALL_ROOT/bin/${BIN}${BIN_EXT}"
+if [ "$OS" != "win64" ]
+then
+  strip "$FULL_BIN"
+fi
+cp "$FULL_BIN" bundle/build/purescript
 
-# Copy files to staging directory
-cp ../dist/build/psc/psc                 build/purescript/
-cp ../dist/build/psci/psci               build/purescript/
-cp ../dist/build/psc-docs/psc-docs       build/purescript/
-cp ../dist/build/psc-publish/psc-publish build/purescript/
-cp ../dist/build/psc-bundle/psc-bundle   build/purescript/
-cp README                                build/purescript/
-cp ../LICENSE                            build/purescript/
-cp ../INSTALL.md                         build/purescript/
+# Copy extra files to the staging directory
+cp scripts/*             bundle/build/purescript/
+cp bundle/README         bundle/build/purescript/
+cp LICENSE               bundle/build/purescript/
+cp INSTALL.md            bundle/build/purescript/
+
+stack list-dependencies >bundle/build/purescript/dependencies.txt
 
 # Make the binary bundle
-pushd build > /dev/null
-tar -zcvf ../$OS.tar.gz purescript
+pushd bundle/build > /dev/null
+tar -zcvf ../${OS}.tar.gz purescript
 popd > /dev/null
 
 # Calculate the SHA hash
-shasum $OS.tar.gz > $OS.sha
+if [ "$OS" = "win64" ]
+then
+  # msys/mingw does not include shasum. :(
+  SHASUM="openssl dgst -sha1"
+else
+  SHASUM="shasum"
+fi
+
+$SHASUM bundle/${OS}.tar.gz > bundle/${OS}.sha
 
 # Remove the staging directory
 rm -rf build/

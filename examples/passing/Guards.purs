@@ -1,6 +1,7 @@
 module Main where
 
 import Prelude
+import Control.Monad.Eff.Console (log)
 
 collatz = \x -> case x of
   y | y `mod` 2.0 == 0.0 -> y / 2.0
@@ -26,4 +27,38 @@ testIndentation x y | x > 0.0
                     | otherwise
   = y - x
 
-main = Control.Monad.Eff.Console.log $ min "Done" "ZZZZ"
+-- pattern guard example with two clauses
+clunky1 :: Int -> Int -> Int
+clunky1 a b | x <- max a b
+            , x > 5
+            = x
+clunky1 a _ = a
+
+clunky2 :: Int -> Int -> Int
+clunky2 a b | x <- max a b
+            , x > 5
+            = x
+            | otherwise
+            = a + b
+
+-- pattern guards on case epxressions
+clunky_case1 :: Int -> Int -> Int
+clunky_case1 a b =
+  case unit of
+    unit | x <- max a b
+         , x > 5
+         -> x
+         | otherwise -> a + b
+
+-- test indentation
+clunky_case2 :: Int -> Int -> Int
+clunky_case2 a b =
+  case unit of
+    unit
+      | x <- max a b
+      , x > 5
+      -> x
+      | otherwise
+      -> a + b
+
+main = log $ min "Done" "ZZZZ"
